@@ -21,6 +21,7 @@ import io.camunda.service.DecisionInstanceServices;
 import io.camunda.service.DecisionRequirementsServices;
 import io.camunda.service.DocumentServices;
 import io.camunda.service.ElementInstanceServices;
+import io.camunda.service.ExportingServices;
 import io.camunda.service.ExpressionServices;
 import io.camunda.service.FormServices;
 import io.camunda.service.GlobalListenerServices;
@@ -66,6 +67,7 @@ public record DefaultServiceRegistry(
     Map<String, DecisionRequirementsServices> decisionRequirementsByTenant,
     Map<String, DocumentServices> documentByTenant,
     Map<String, ElementInstanceServices> elementInstanceByTenant,
+    Map<String, ExportingServices> exportingByTenant,
     Map<String, ExpressionServices> expressionByTenant,
     Map<String, FormServices> formByTenant,
     Map<String, GlobalListenerServices> globalListenerByTenant,
@@ -166,6 +168,11 @@ public record DefaultServiceRegistry(
   @Override
   public ElementInstanceServices elementInstanceServices(final String physicalTenantId) {
     return byTenant(elementInstanceByTenant, physicalTenantId);
+  }
+
+  @Override
+  public ExportingServices exportingServices(final String physicalTenantId) {
+    return byTenant(exportingByTenant, physicalTenantId);
   }
 
   @Override
@@ -325,6 +332,7 @@ public record DefaultServiceRegistry(
         new HashMap<>();
     private final Map<String, DocumentServices> documentByTenant = new HashMap<>();
     private final Map<String, ElementInstanceServices> elementInstanceByTenant = new HashMap<>();
+    private final Map<String, ExportingServices> exportingByTenant = new HashMap<>();
     private final Map<String, ExpressionServices> expressionByTenant = new HashMap<>();
     private final Map<String, FormServices> formByTenant = new HashMap<>();
     private final Map<String, GlobalListenerServices> globalListenerByTenant = new HashMap<>();
@@ -425,6 +433,11 @@ public record DefaultServiceRegistry(
     public Builder elementInstanceServices(
         final String tenantId, final ElementInstanceServices service) {
       elementInstanceByTenant.put(tenantId, service);
+      return this;
+    }
+
+    public Builder exportingServices(final String tenantId, final ExportingServices service) {
+      exportingByTenant.put(tenantId, service);
       return this;
     }
 
@@ -553,6 +566,7 @@ public record DefaultServiceRegistry(
           Map.copyOf(decisionRequirementsByTenant),
           Map.copyOf(documentByTenant),
           Map.copyOf(elementInstanceByTenant),
+          Map.copyOf(exportingByTenant),
           Map.copyOf(expressionByTenant),
           Map.copyOf(formByTenant),
           Map.copyOf(globalListenerByTenant),
