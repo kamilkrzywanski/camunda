@@ -12,6 +12,7 @@ import io.camunda.service.AgentHistoryServices;
 import io.camunda.service.AgentInstanceServices;
 import io.camunda.service.AuditLogServices;
 import io.camunda.service.AuthorizationServices;
+import io.camunda.service.BackupServices;
 import io.camunda.service.BatchOperationServices;
 import io.camunda.service.ClockServices;
 import io.camunda.service.ClusterVariableServices;
@@ -58,6 +59,7 @@ public record DefaultServiceRegistry(
     Map<String, AgentInstanceServices> agentInstanceByTenant,
     Map<String, AuditLogServices> auditLogByTenant,
     Map<String, AuthorizationServices> authorizationByTenant,
+    Map<String, BackupServices> backupByTenant,
     Map<String, BatchOperationServices> batchOperationByTenant,
     Map<String, ClockServices> clockByTenant,
     Map<String, ClusterVariableServices> clusterVariableByTenant,
@@ -123,6 +125,11 @@ public record DefaultServiceRegistry(
   @Override
   public AuthorizationServices authorizationServices(final String physicalTenantId) {
     return byTenant(authorizationByTenant, physicalTenantId);
+  }
+
+  @Override
+  public BackupServices backupServices(final String physicalTenantId) {
+    return byTenant(backupByTenant, physicalTenantId);
   }
 
   @Override
@@ -321,6 +328,7 @@ public record DefaultServiceRegistry(
     private final Map<String, AgentInstanceServices> agentInstanceByTenant = new HashMap<>();
     private final Map<String, AuditLogServices> auditLogByTenant = new HashMap<>();
     private final Map<String, AuthorizationServices> authorizationByTenant = new HashMap<>();
+    private final Map<String, BackupServices> backupByTenant = new HashMap<>();
     private final Map<String, BatchOperationServices> batchOperationByTenant = new HashMap<>();
     private final Map<String, ClockServices> clockByTenant = new HashMap<>();
     private final Map<String, ClusterVariableServices> clusterVariableByTenant = new HashMap<>();
@@ -382,6 +390,11 @@ public record DefaultServiceRegistry(
     public Builder authorizationServices(
         final String tenantId, final AuthorizationServices service) {
       authorizationByTenant.put(tenantId, service);
+      return this;
+    }
+
+    public Builder backupServices(final String tenantId, final BackupServices service) {
+      backupByTenant.put(tenantId, service);
       return this;
     }
 
@@ -557,6 +570,7 @@ public record DefaultServiceRegistry(
           Map.copyOf(agentInstanceByTenant),
           Map.copyOf(auditLogByTenant),
           Map.copyOf(authorizationByTenant),
+          Map.copyOf(backupByTenant),
           Map.copyOf(batchOperationByTenant),
           Map.copyOf(clockByTenant),
           Map.copyOf(clusterVariableByTenant),
