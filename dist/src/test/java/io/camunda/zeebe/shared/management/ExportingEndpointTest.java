@@ -13,7 +13,7 @@ import static org.assertj.core.api.Assertions.from;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import io.camunda.service.admin.exporting.ExportingControlApi;
+import io.camunda.zeebe.gateway.admin.ExportingRequestBroadcaster;
 import java.util.concurrent.CompletableFuture;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -24,7 +24,7 @@ final class ExportingEndpointTest {
   @ValueSource(strings = {ExportingEndpoint.PAUSE, ExportingEndpoint.RESUME})
   void pauseAndResumeFailsIfCallFailsDirectly(final String operation) {
     // given
-    final var service = mock(ExportingControlApi.class);
+    final var service = mock(ExportingRequestBroadcaster.class);
     final var endpoint = new ExportingEndpoint(service);
 
     // when
@@ -42,7 +42,7 @@ final class ExportingEndpointTest {
   @ValueSource(strings = {ExportingEndpoint.PAUSE, ExportingEndpoint.RESUME})
   void pauseAndResumeFailIfCallReturnsFailedFuture(final String operation) {
     // given
-    final var service = mock(ExportingControlApi.class);
+    final var service = mock(ExportingRequestBroadcaster.class);
     final var endpoint = new ExportingEndpoint(service);
 
     // when
@@ -63,7 +63,7 @@ final class ExportingEndpointTest {
   @ValueSource(strings = {ExportingEndpoint.PAUSE, ExportingEndpoint.RESUME})
   void pauseAndResumeCanSucceed(final String operation) {
     // given
-    final var service = mock(ExportingControlApi.class);
+    final var service = mock(ExportingRequestBroadcaster.class);
     final var endpoint = new ExportingEndpoint(service);
 
     // when
