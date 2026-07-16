@@ -93,6 +93,21 @@ class SecretsTest {
     }
 
     @Test
+    void shouldDefaultBatchingToDisabled() {
+      // given batch-enabled/batch-size are not set for aws-prod (see @TestPropertySource)
+      // when the unified configuration is bound
+      final Secrets secrets = unifiedConfiguration.getCamunda().getSecrets();
+
+      // then batching defaults to off, with the standard AWS batch size as an inert default
+      assertThat(secrets.getStores().getAwsSecretsManager().get("aws-prod"))
+          .satisfies(
+              store -> {
+                assertThat(store.isBatchEnabled()).isFalse();
+                assertThat(store.getBatchSize()).isEqualTo(20);
+              });
+    }
+
+    @Test
     void shouldBindMultipleStoresKeyedById() {
       // given two aws-secrets-manager stores are configured (see @TestPropertySource)
       // when the unified configuration is bound
@@ -115,6 +130,35 @@ class SecretsTest {
               store -> {
                 assertThat(store.getRegion()).isNull();
                 assertThat(store.getPathPrefix()).isEqualTo("team/");
+              });
+    }
+  }
+
+  @Nested
+  @TestPropertySource(
+      properties = {
+        "camunda.secrets.stores.aws-secrets-manager.batched.batch-enabled=true",
+        "camunda.secrets.stores.aws-secrets-manager.batched.batch-size=5"
+      })
+  class WithBatchingConfigured {
+    private final UnifiedConfiguration unifiedConfiguration;
+
+    WithBatchingConfigured(@Autowired final UnifiedConfiguration unifiedConfiguration) {
+      this.unifiedConfiguration = unifiedConfiguration;
+    }
+
+    @Test
+    void shouldBindBatchEnabledAndBatchSize() {
+      // given batch-enabled/batch-size are set (see @TestPropertySource)
+      // when the unified configuration is bound
+      final Secrets secrets = unifiedConfiguration.getCamunda().getSecrets();
+
+      // then both are bound onto the named store
+      assertThat(secrets.getStores().getAwsSecretsManager().get("batched"))
+          .satisfies(
+              store -> {
+                assertThat(store.isBatchEnabled()).isTrue();
+                assertThat(store.getBatchSize()).isEqualTo(5);
               });
     }
   }

@@ -22,6 +22,8 @@ import org.springframework.boot.context.properties.NestedConfigurationProperty;
  *   <li>{@code camunda.secrets.stores.file.<id>.path}
  *   <li>{@code camunda.secrets.stores.aws-secrets-manager.<id>.region}
  *   <li>{@code camunda.secrets.stores.aws-secrets-manager.<id>.path-prefix}
+ *   <li>{@code camunda.secrets.stores.aws-secrets-manager.<id>.batch-enabled}
+ *   <li>{@code camunda.secrets.stores.aws-secrets-manager.<id>.batch-size}
  * </ul>
  *
  * <p>Secrets configuration is overridable per physical tenant via {@code
@@ -97,6 +99,20 @@ public class Secrets {
      */
     private @Nullable String pathPrefix;
 
+    /**
+     * Opt-in: resolve secrets via AWS's {@code BatchGetSecretValue} (fewer round-trips) instead of
+     * one {@code GetSecretValue} call per reference. Off by default because it requires the {@code
+     * secretsmanager:BatchGetSecretValue} IAM action in addition to {@code GetSecretValue}, which
+     * not every deployment's IAM policy grants.
+     */
+    private boolean batchEnabled = false;
+
+    /**
+     * Maximum number of secret ids per {@code BatchGetSecretValue} call when {@link #batchEnabled}
+     * is set. Only meaningful when batching is enabled. AWS caps this at 20.
+     */
+    private int batchSize = 20;
+
     public @Nullable String getRegion() {
       return region;
     }
@@ -111,6 +127,22 @@ public class Secrets {
 
     public void setPathPrefix(final @Nullable String pathPrefix) {
       this.pathPrefix = pathPrefix;
+    }
+
+    public boolean isBatchEnabled() {
+      return batchEnabled;
+    }
+
+    public void setBatchEnabled(final boolean batchEnabled) {
+      this.batchEnabled = batchEnabled;
+    }
+
+    public int getBatchSize() {
+      return batchSize;
+    }
+
+    public void setBatchSize(final int batchSize) {
+      this.batchSize = batchSize;
     }
   }
 }
