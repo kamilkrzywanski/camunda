@@ -25,21 +25,45 @@ import org.jspecify.annotations.Nullable;
  *     null} uses the default AWS endpoint for the resolved region
  * @param maxRetries number of retries the SDK performs on transient failures (throttling, 5xx);
  *     must be {@code >= 0}
+ * @param batchEnabled opt-in: resolve via {@code BatchGetSecretValue} instead of one {@code
+ *     GetSecretValue} call per reference. Off by default since it requires the {@code
+ *     secretsmanager:BatchGetSecretValue} IAM action in addition to {@code GetSecretValue}
+ * @param batchSize maximum secret ids per {@code BatchGetSecretValue} call when {@code
+ *     batchEnabled} is set; must be between 1 and {@value #MAX_BATCH_SIZE} (AWS's hard limit)
  */
 public record AwsSecretsManagerStoreConfig(
-    @Nullable String region, @Nullable String pathPrefix, @Nullable URI endpoint, int maxRetries) {
+    @Nullable String region,
+    @Nullable String pathPrefix,
+    @Nullable URI endpoint,
+    int maxRetries,
+    boolean batchEnabled,
+    int batchSize) {
 
   /** Default number of retries applied when none is configured. */
   public static final int DEFAULT_MAX_RETRIES = 3;
+
+  /** Default batch size when batching is enabled but none is configured. */
+  public static final int DEFAULT_BATCH_SIZE = 20;
+
+  /** Maximum secret ids AWS accepts in a single {@code BatchGetSecretValue} call. */
+  public static final int MAX_BATCH_SIZE = 20;
 
   public AwsSecretsManagerStoreConfig {
     if (maxRetries < 0) {
       throw new IllegalArgumentException("maxRetries must not be negative, but was " + maxRetries);
     }
+    if (batchSize < 1 || batchSize > MAX_BATCH_SIZE) {
+      throw new IllegalArgumentException(
+          "batchSize must be between 1 and " + MAX_BATCH_SIZE + ", but was " + batchSize);
+    }
   }
 
-  /** Creates a config with only a path prefix and default retries; region resolved by the SDK. */
+  /**
+   * Creates a config with only a path prefix, default retries, and batching disabled; region
+   * resolved by the SDK.
+   */
   public static AwsSecretsManagerStoreConfig of(final @Nullable String pathPrefix) {
-    return new AwsSecretsManagerStoreConfig(null, pathPrefix, null, DEFAULT_MAX_RETRIES);
+    return new AwsSecretsManagerStoreConfig(
+        null, pathPrefix, null, DEFAULT_MAX_RETRIES, false, DEFAULT_BATCH_SIZE);
   }
 }

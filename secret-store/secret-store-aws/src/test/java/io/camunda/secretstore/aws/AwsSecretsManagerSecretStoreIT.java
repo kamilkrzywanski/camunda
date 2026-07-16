@@ -95,8 +95,8 @@ class AwsSecretsManagerSecretStoreIT {
   }
 
   @Test
-  void shouldResolveMultipleSecretsInOneBatchCall() {
-    // given
+  void shouldResolveMultipleSecretsWithBatchingDisabled() {
+    // given — the default path: one GetSecretValue call per reference
     try (final var store = storeWithClient("camunda/")) {
       // when
       final var dbPassword = new AwsSecretsManagerSecretReference("db-password");
@@ -104,8 +104,31 @@ class AwsSecretsManagerSecretStoreIT {
       final var missing = new AwsSecretsManagerSecretReference("does-not-exist");
       final var result = store.resolve(Set.of(dbPassword, apiToken, missing));
 
-      // then — one BatchGetSecretValue call resolves the found secrets and reports the missing
-      // one as a per-item error, not a store-wide failure
+      // then
+      assertThat(result.get(dbPassword))
+          .isInstanceOf(Resolved.class)
+          .extracting(r -> ((Resolved) r).value())
+          .isEqualTo("s3cr3t");
+      assertThat(result.get(apiToken))
+          .isInstanceOf(Resolved.class)
+          .extracting(r -> ((Resolved) r).value())
+          .isEqualTo("tok3n");
+      assertThat(result.get(missing)).isInstanceOf(Failed.class);
+    }
+  }
+
+  @Test
+  void shouldResolveMultipleSecretsInOneBatchCallWhenBatchingEnabled() {
+    // given — opt-in batching: one BatchGetSecretValue call resolves all three at once
+    try (final var store = storeWithBatchClient("camunda/")) {
+      // when
+      final var dbPassword = new AwsSecretsManagerSecretReference("db-password");
+      final var apiToken = new AwsSecretsManagerSecretReference("api-token");
+      final var missing = new AwsSecretsManagerSecretReference("does-not-exist");
+      final var result = store.resolve(Set.of(dbPassword, apiToken, missing));
+
+      // then — the found secrets resolve and the missing one is a per-item error, not a
+      // store-wide failure
       assertThat(result.get(dbPassword))
           .isInstanceOf(Resolved.class)
           .extracting(r -> ((Resolved) r).value())
@@ -146,7 +169,42 @@ class AwsSecretsManagerSecretStoreIT {
               LOCALSTACK.getRegion(),
               "camunda/",
               URI.create(LOCALSTACK.getEndpointOverride(Service.SECRETSMANAGER).toString()),
-              AwsSecretsManagerStoreConfig.DEFAULT_MAX_RETRIES);
+              AwsSecretsManagerStoreConfig.DEFAULT_MAX_RETRIES,
+              false,
+              AwsSecretsManagerStoreConfig.DEFAULT_BATCH_SIZE);
+
+      try (final var store = AwsSecretsManagerSecretStore.fromConfig(config)) {
+        // when
+        final var ref = new AwsSecretsManagerSecretReference("api-token");
+        final var result = store.resolve(Set.of(ref));
+
+        // then
+        assertThat(result.get(ref))
+            .isInstanceOf(Resolved.class)
+            .extracting(r -> ((Resolved) r).value())
+            .isEqualTo("tok3n");
+      }
+    } finally {
+      System.clearProperty("aws.accessKeyId");
+      System.clearProperty("aws.secretAccessKey");
+    }
+  }
+
+  @Test
+  void shouldResolveViaFromConfigWithBatchingEnabled() {
+    // given — the opt-in flag wired all the way through fromConfig() to a real
+    // BatchGetSecretValue call against LocalStack, not just via the raw constructor
+    System.setProperty("aws.accessKeyId", LOCALSTACK.getAccessKey());
+    System.setProperty("aws.secretAccessKey", LOCALSTACK.getSecretKey());
+    try {
+      final var config =
+          new AwsSecretsManagerStoreConfig(
+              LOCALSTACK.getRegion(),
+              "camunda/",
+              URI.create(LOCALSTACK.getEndpointOverride(Service.SECRETSMANAGER).toString()),
+              AwsSecretsManagerStoreConfig.DEFAULT_MAX_RETRIES,
+              true,
+              AwsSecretsManagerStoreConfig.DEFAULT_BATCH_SIZE);
 
       try (final var store = AwsSecretsManagerSecretStore.fromConfig(config)) {
         // when
@@ -166,16 +224,22 @@ class AwsSecretsManagerSecretStoreIT {
   }
 
   private static AwsSecretsManagerSecretStore storeWithClient(final String prefix) {
-    final var client =
-        SecretsManagerClient.builder()
-            .endpointOverride(LOCALSTACK.getEndpointOverride(Service.SECRETSMANAGER))
-            .region(Region.of(LOCALSTACK.getRegion()))
-            .credentialsProvider(
-                StaticCredentialsProvider.create(
-                    AwsBasicCredentials.create(
-                        LOCALSTACK.getAccessKey(), LOCALSTACK.getSecretKey())))
-            .build();
-    return new AwsSecretsManagerSecretStore(client, prefix);
+    return new AwsSecretsManagerSecretStore(localStackClient(), prefix);
+  }
+
+  private static AwsSecretsManagerSecretStore storeWithBatchClient(final String prefix) {
+    return new AwsSecretsManagerSecretStore(
+        localStackClient(), prefix, true, AwsSecretsManagerStoreConfig.DEFAULT_BATCH_SIZE);
+  }
+
+  private static SecretsManagerClient localStackClient() {
+    return SecretsManagerClient.builder()
+        .endpointOverride(LOCALSTACK.getEndpointOverride(Service.SECRETSMANAGER))
+        .region(Region.of(LOCALSTACK.getRegion()))
+        .credentialsProvider(
+            StaticCredentialsProvider.create(
+                AwsBasicCredentials.create(LOCALSTACK.getAccessKey(), LOCALSTACK.getSecretKey())))
+        .build();
   }
 
   private static void createSecret(final String name, final String value) {

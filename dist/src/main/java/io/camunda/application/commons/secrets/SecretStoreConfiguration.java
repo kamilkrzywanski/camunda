@@ -73,7 +73,9 @@ public class SecretStoreConfiguration {
                             awsStore.getRegion(),
                             awsStore.getPathPrefix(),
                             null,
-                            AwsSecretsManagerStoreConfig.DEFAULT_MAX_RETRIES);
+                            AwsSecretsManagerStoreConfig.DEFAULT_MAX_RETRIES,
+                            awsStore.isBatchEnabled(),
+                            awsStore.getBatchSize());
                     registerStore(
                         stores,
                         storeId,

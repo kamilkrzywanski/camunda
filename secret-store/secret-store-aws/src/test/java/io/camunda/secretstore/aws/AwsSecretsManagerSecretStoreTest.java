@@ -35,6 +35,8 @@ import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.secretsmanager.model.APIErrorType;
 import software.amazon.awssdk.services.secretsmanager.model.BatchGetSecretValueRequest;
 import software.amazon.awssdk.services.secretsmanager.model.BatchGetSecretValueResponse;
+import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueRequest;
+import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueResponse;
 import software.amazon.awssdk.services.secretsmanager.model.ListSecretsRequest;
 import software.amazon.awssdk.services.secretsmanager.model.ListSecretsResponse;
 import software.amazon.awssdk.services.secretsmanager.model.SecretListEntry;
@@ -46,10 +48,221 @@ class AwsSecretsManagerSecretStoreTest {
 
   @Mock private SecretsManagerClient client;
 
+  // ---- default path: one GetSecretValue call per reference (batching disabled) ----
+
   @Test
   void shouldResolveKnownSecret() {
     // given
     final var store = new AwsSecretsManagerSecretStore(client, "camunda/");
+    when(client.getSecretValue(any(GetSecretValueRequest.class)))
+        .thenReturn(GetSecretValueResponse.builder().secretString("s3cr3t").build());
+
+    // when
+    final var ref = new AwsSecretsManagerSecretReference("db-password");
+    final var result = store.resolve(Set.of(ref));
+
+    // then
+    assertThat(result.get(ref))
+        .isInstanceOf(Resolved.class)
+        .extracting(r -> ((Resolved) r).value())
+        .isEqualTo("s3cr3t");
+  }
+
+  @Test
+  void shouldPrependPathPrefixToSecretId() {
+    // given
+    final var store = new AwsSecretsManagerSecretStore(client, "camunda/");
+    when(client.getSecretValue(any(GetSecretValueRequest.class)))
+        .thenReturn(GetSecretValueResponse.builder().secretString("v").build());
+
+    // when
+    store.resolve(Set.of(new AwsSecretsManagerSecretReference("token")));
+
+    // then
+    final var captor = ArgumentCaptor.forClass(GetSecretValueRequest.class);
+    verify(client).getSecretValue(captor.capture());
+    assertThat(captor.getValue().secretId()).isEqualTo("camunda/token");
+  }
+
+  @Test
+  void shouldUseBareNameWhenPrefixIsNull() {
+    // given
+    final var store = new AwsSecretsManagerSecretStore(client, null);
+    when(client.getSecretValue(any(GetSecretValueRequest.class)))
+        .thenReturn(GetSecretValueResponse.builder().secretString("v").build());
+
+    // when
+    store.resolve(Set.of(new AwsSecretsManagerSecretReference("token")));
+
+    // then
+    final var captor = ArgumentCaptor.forClass(GetSecretValueRequest.class);
+    verify(client).getSecretValue(captor.capture());
+    assertThat(captor.getValue().secretId()).isEqualTo("token");
+  }
+
+  @Test
+  void shouldReturnNotFoundForMissingSecret() {
+    // given
+    final var store = new AwsSecretsManagerSecretStore(client, "");
+    when(client.getSecretValue(any(GetSecretValueRequest.class)))
+        .thenThrow(
+            (SecretsManagerException)
+                SecretsManagerException.builder()
+                    .awsErrorDetails(
+                        AwsErrorDetails.builder().errorCode("ResourceNotFoundException").build())
+                    .message("missing")
+                    .build());
+
+    // when
+    final var ref = new AwsSecretsManagerSecretReference("missing");
+    final var result = store.resolve(Set.of(ref));
+
+    // then
+    assertThat(result.get(ref)).isInstanceOf(Failed.class);
+    assertThat(((Failed) result.get(ref)).code()).isEqualTo(SecretErrorCode.NOT_FOUND);
+  }
+
+  @Test
+  void shouldReturnInvalidRefForInvalidParameter() {
+    // given
+    final var store = new AwsSecretsManagerSecretStore(client, "");
+    when(client.getSecretValue(any(GetSecretValueRequest.class)))
+        .thenThrow(
+            (SecretsManagerException)
+                SecretsManagerException.builder()
+                    .awsErrorDetails(
+                        AwsErrorDetails.builder().errorCode("InvalidParameterException").build())
+                    .message("bad")
+                    .build());
+
+    // when
+    final var ref = new AwsSecretsManagerSecretReference("bad");
+    final var result = store.resolve(Set.of(ref));
+
+    // then
+    assertThat(((Failed) result.get(ref)).code()).isEqualTo(SecretErrorCode.INVALID_REF);
+  }
+
+  @Test
+  void shouldReturnAccessDeniedForAccessDeniedError() {
+    // given
+    final var store = new AwsSecretsManagerSecretStore(client, "");
+    when(client.getSecretValue(any(GetSecretValueRequest.class)))
+        .thenThrow(
+            (SecretsManagerException)
+                SecretsManagerException.builder()
+                    .awsErrorDetails(
+                        AwsErrorDetails.builder().errorCode("AccessDeniedException").build())
+                    .statusCode(400)
+                    .message("denied")
+                    .build());
+
+    // when
+    final var ref = new AwsSecretsManagerSecretReference("secret");
+    final var result = store.resolve(Set.of(ref));
+
+    // then
+    assertThat(((Failed) result.get(ref)).code()).isEqualTo(SecretErrorCode.ACCESS_DENIED);
+  }
+
+  @Test
+  void shouldReturnInvalidRefForBinaryOnlySecret() {
+    // given — a secret with no string value (binary secret)
+    final var store = new AwsSecretsManagerSecretStore(client, "");
+    when(client.getSecretValue(any(GetSecretValueRequest.class)))
+        .thenReturn(GetSecretValueResponse.builder().build());
+
+    // when
+    final var ref = new AwsSecretsManagerSecretReference("binary");
+    final var result = store.resolve(Set.of(ref));
+
+    // then
+    assertThat(((Failed) result.get(ref)).code()).isEqualTo(SecretErrorCode.INVALID_REF);
+  }
+
+  @Test
+  void shouldThrowUnavailableOnConnectivityError() {
+    // given
+    final var store = new AwsSecretsManagerSecretStore(client, "");
+    when(client.getSecretValue(any(GetSecretValueRequest.class)))
+        .thenThrow(SdkClientException.create("connection refused"));
+
+    // when / then
+    assertThatThrownBy(() -> store.resolve(Set.of(new AwsSecretsManagerSecretReference("any"))))
+        .isInstanceOf(SecretStoreUnavailableException.class);
+  }
+
+  @Test
+  void shouldThrowUnavailableForUnrecognizedServiceError() {
+    // given — an AWS error code that isn't one of the known per-secret failures (e.g. throttling
+    // exhausted, internal service error) must propagate as a store-wide failure, not be silently
+    // swallowed as a per-secret Failed result
+    final var store = new AwsSecretsManagerSecretStore(client, "");
+    when(client.getSecretValue(any(GetSecretValueRequest.class)))
+        .thenThrow(
+            (SecretsManagerException)
+                SecretsManagerException.builder()
+                    .awsErrorDetails(
+                        AwsErrorDetails.builder()
+                            .errorCode("InternalServiceErrorException")
+                            .build())
+                    .message("internal error")
+                    .build());
+
+    // when / then
+    assertThatThrownBy(() -> store.resolve(Set.of(new AwsSecretsManagerSecretReference("any"))))
+        .isInstanceOf(SecretStoreUnavailableException.class);
+  }
+
+  @Test
+  void shouldReturnResultForEveryRefInSet() {
+    // given
+    final var store = new AwsSecretsManagerSecretStore(client, "");
+    when(client.getSecretValue(any(GetSecretValueRequest.class)))
+        .thenAnswer(
+            invocation -> {
+              final GetSecretValueRequest req = invocation.getArgument(0);
+              if (req.secretId().equals("known")) {
+                return GetSecretValueResponse.builder().secretString("value").build();
+              }
+              throw (SecretsManagerException)
+                  SecretsManagerException.builder()
+                      .awsErrorDetails(
+                          AwsErrorDetails.builder().errorCode("ResourceNotFoundException").build())
+                      .message("missing")
+                      .build();
+            });
+
+    // when
+    final var known = new AwsSecretsManagerSecretReference("known");
+    final var missing = new AwsSecretsManagerSecretReference("missing");
+    final var result = store.resolve(Set.of(known, missing));
+
+    // then
+    assertThat(result).containsKeys(known, missing);
+    assertThat(result.get(known)).isInstanceOf(Resolved.class);
+    assertThat(result.get(missing)).isInstanceOf(Failed.class);
+  }
+
+  @Test
+  void shouldReturnEmptyMapForEmptyRefs() {
+    // given
+    final var store = new AwsSecretsManagerSecretStore(client, "");
+
+    // when
+    final var result = store.resolve(Set.of());
+
+    // then
+    assertThat(result).isEmpty();
+    verifyNoInteractions(client);
+  }
+
+  // ---- opt-in path: BatchGetSecretValue (batchEnabled=true) ----
+
+  @Test
+  void shouldResolveKnownSecretWhenBatchEnabled() {
+    // given
+    final var store = new AwsSecretsManagerSecretStore(client, "camunda/", true, 20);
     when(client.batchGetSecretValue(any(BatchGetSecretValueRequest.class)))
         .thenReturn(
             BatchGetSecretValueResponse.builder()
@@ -72,48 +285,23 @@ class AwsSecretsManagerSecretStoreTest {
   }
 
   @Test
-  void shouldPrependPathPrefixToSecretId() {
-    // given
-    final var store = new AwsSecretsManagerSecretStore(client, "camunda/");
-    when(client.batchGetSecretValue(any(BatchGetSecretValueRequest.class)))
-        .thenReturn(
-            BatchGetSecretValueResponse.builder()
-                .secretValues(
-                    SecretValueEntry.builder().name("camunda/token").secretString("v").build())
-                .build());
-
-    // when
-    store.resolve(Set.of(new AwsSecretsManagerSecretReference("token")));
-
-    // then
-    final var captor = ArgumentCaptor.forClass(BatchGetSecretValueRequest.class);
-    verify(client).batchGetSecretValue(captor.capture());
-    assertThat(captor.getValue().secretIdList()).containsExactly("camunda/token");
-  }
-
-  @Test
-  void shouldUseBareNameWhenPrefixIsNull() {
-    // given
-    final var store = new AwsSecretsManagerSecretStore(client, null);
-    when(client.batchGetSecretValue(any(BatchGetSecretValueRequest.class)))
-        .thenReturn(
-            BatchGetSecretValueResponse.builder()
-                .secretValues(SecretValueEntry.builder().name("token").secretString("v").build())
-                .build());
-
-    // when
-    store.resolve(Set.of(new AwsSecretsManagerSecretReference("token")));
-
-    // then
-    final var captor = ArgumentCaptor.forClass(BatchGetSecretValueRequest.class);
-    verify(client).batchGetSecretValue(captor.capture());
-    assertThat(captor.getValue().secretIdList()).containsExactly("token");
-  }
-
-  @Test
-  void shouldReturnNotFoundForMissingSecret() {
-    // given
+  void shouldNotCallBatchApiWhenBatchDisabled() {
+    // given — the default 2-arg constructor must never call batchGetSecretValue
     final var store = new AwsSecretsManagerSecretStore(client, "");
+    when(client.getSecretValue(any(GetSecretValueRequest.class)))
+        .thenReturn(GetSecretValueResponse.builder().secretString("v").build());
+
+    // when
+    store.resolve(Set.of(new AwsSecretsManagerSecretReference("token")));
+
+    // then
+    verify(client, times(0)).batchGetSecretValue(any(BatchGetSecretValueRequest.class));
+  }
+
+  @Test
+  void shouldReturnNotFoundForMissingSecretWhenBatchEnabled() {
+    // given
+    final var store = new AwsSecretsManagerSecretStore(client, "", true, 20);
     when(client.batchGetSecretValue(any(BatchGetSecretValueRequest.class)))
         .thenReturn(
             BatchGetSecretValueResponse.builder()
@@ -135,9 +323,9 @@ class AwsSecretsManagerSecretStoreTest {
   }
 
   @Test
-  void shouldReturnInvalidRefForInvalidParameter() {
+  void shouldReturnInvalidRefForInvalidParameterWhenBatchEnabled() {
     // given
-    final var store = new AwsSecretsManagerSecretStore(client, "");
+    final var store = new AwsSecretsManagerSecretStore(client, "", true, 20);
     when(client.batchGetSecretValue(any(BatchGetSecretValueRequest.class)))
         .thenReturn(
             BatchGetSecretValueResponse.builder()
@@ -158,9 +346,9 @@ class AwsSecretsManagerSecretStoreTest {
   }
 
   @Test
-  void shouldReturnAccessDeniedForPerItemDecryptionFailure() {
+  void shouldReturnAccessDeniedForPerItemDecryptionFailureWhenBatchEnabled() {
     // given
-    final var store = new AwsSecretsManagerSecretStore(client, "");
+    final var store = new AwsSecretsManagerSecretStore(client, "", true, 20);
     when(client.batchGetSecretValue(any(BatchGetSecretValueRequest.class)))
         .thenReturn(
             BatchGetSecretValueResponse.builder()
@@ -181,10 +369,10 @@ class AwsSecretsManagerSecretStoreTest {
   }
 
   @Test
-  void shouldReturnAccessDeniedWhenWholeCallIsDenied() {
+  void shouldReturnAccessDeniedWhenWholeBatchCallIsDenied() {
     // given — the whole batch call is denied (e.g. IAM policy blocks the store's secret prefix
     // entirely), as opposed to a single secret being denied via a per-item error entry
-    final var store = new AwsSecretsManagerSecretStore(client, "");
+    final var store = new AwsSecretsManagerSecretStore(client, "", true, 20);
     final var e =
         (SecretsManagerException)
             SecretsManagerException.builder()
@@ -204,9 +392,9 @@ class AwsSecretsManagerSecretStoreTest {
   }
 
   @Test
-  void shouldReturnInvalidRefForBinaryOnlySecret() {
+  void shouldReturnInvalidRefForBinaryOnlySecretWhenBatchEnabled() {
     // given — a secret with no string value (binary secret)
-    final var store = new AwsSecretsManagerSecretStore(client, "");
+    final var store = new AwsSecretsManagerSecretStore(client, "", true, 20);
     when(client.batchGetSecretValue(any(BatchGetSecretValueRequest.class)))
         .thenReturn(
             BatchGetSecretValueResponse.builder()
@@ -222,9 +410,9 @@ class AwsSecretsManagerSecretStoreTest {
   }
 
   @Test
-  void shouldThrowUnavailableOnConnectivityError() {
+  void shouldThrowUnavailableOnConnectivityErrorWhenBatchEnabled() {
     // given
-    final var store = new AwsSecretsManagerSecretStore(client, "");
+    final var store = new AwsSecretsManagerSecretStore(client, "", true, 20);
     when(client.batchGetSecretValue(any(BatchGetSecretValueRequest.class)))
         .thenThrow(SdkClientException.create("connection refused"));
 
@@ -236,7 +424,7 @@ class AwsSecretsManagerSecretStoreTest {
   @Test
   void shouldReturnResultForEveryRefInBatch() {
     // given
-    final var store = new AwsSecretsManagerSecretStore(client, "");
+    final var store = new AwsSecretsManagerSecretStore(client, "", true, 20);
     when(client.batchGetSecretValue(any(BatchGetSecretValueRequest.class)))
         .thenReturn(
             BatchGetSecretValueResponse.builder()
@@ -264,7 +452,7 @@ class AwsSecretsManagerSecretStoreTest {
   @Test
   void shouldGuaranteeResultForEveryRefEvenWhenAwsOmitsOne() {
     // given — AWS returns neither a value nor an error entry for one requested id
-    final var store = new AwsSecretsManagerSecretStore(client, "");
+    final var store = new AwsSecretsManagerSecretStore(client, "", true, 20);
     when(client.batchGetSecretValue(any(BatchGetSecretValueRequest.class)))
         .thenReturn(
             BatchGetSecretValueResponse.builder()
@@ -286,7 +474,7 @@ class AwsSecretsManagerSecretStoreTest {
   @Test
   void shouldBatchMoreThan20RefsAcrossMultipleCalls() {
     // given 25 refs, one more than two full 20-id and 5-id AWS BatchGetSecretValue batches
-    final var store = new AwsSecretsManagerSecretStore(client, "");
+    final var store = new AwsSecretsManagerSecretStore(client, "", true, 20);
     final var refs =
         IntStream.range(0, 25)
             .mapToObj(i -> new AwsSecretsManagerSecretReference("secret-" + i))
@@ -317,17 +505,49 @@ class AwsSecretsManagerSecretStoreTest {
   }
 
   @Test
-  void shouldReturnEmptyMapForEmptyRefs() {
-    // given
-    final var store = new AwsSecretsManagerSecretStore(client, "");
+  void shouldRespectConfiguredBatchSizeSmallerThanAwsLimit() {
+    // given 12 refs with a configured batch size of 5: 5 + 5 + 2
+    final var store = new AwsSecretsManagerSecretStore(client, "", true, 5);
+    final var refs =
+        IntStream.range(0, 12)
+            .mapToObj(i -> new AwsSecretsManagerSecretReference("secret-" + i))
+            .collect(Collectors.toCollection(HashSet::new));
+    when(client.batchGetSecretValue(any(BatchGetSecretValueRequest.class)))
+        .thenAnswer(
+            invocation -> {
+              final BatchGetSecretValueRequest req = invocation.getArgument(0);
+              return BatchGetSecretValueResponse.builder()
+                  .secretValues(
+                      req.secretIdList().stream()
+                          .map(id -> SecretValueEntry.builder().name(id).secretString("v").build())
+                          .toList())
+                  .build();
+            });
 
     // when
-    final var result = store.resolve(Set.of());
+    final var result = store.resolve(refs);
 
     // then
-    assertThat(result).isEmpty();
-    verifyNoInteractions(client);
+    final var captor = ArgumentCaptor.forClass(BatchGetSecretValueRequest.class);
+    verify(client, times(3)).batchGetSecretValue(captor.capture());
+    assertThat(captor.getAllValues())
+        .extracting(req -> req.secretIdList().size())
+        .containsExactlyInAnyOrder(5, 5, 2);
+    assertThat(result).hasSize(12);
   }
+
+  @Test
+  void shouldRejectBatchSizeOutsideValidRange() {
+    // when / then
+    assertThatThrownBy(() -> new AwsSecretsManagerSecretStore(client, "", true, 21))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("batchSize");
+    assertThatThrownBy(() -> new AwsSecretsManagerSecretStore(client, "", true, 0))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("batchSize");
+  }
+
+  // ---- list(), unaffected by batching ----
 
   @Test
   void shouldListSecretsFilteredByPrefixAndStripIt() {

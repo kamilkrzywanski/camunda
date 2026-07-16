@@ -17,13 +17,35 @@ class AwsSecretsManagerStoreConfigTest {
   @Test
   void shouldRejectNegativeMaxRetries() {
     // when / then
-    assertThatThrownBy(() -> new AwsSecretsManagerStoreConfig(null, null, null, -1))
+    assertThatThrownBy(() -> new AwsSecretsManagerStoreConfig(null, null, null, -1, false, 20))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("maxRetries");
   }
 
   @Test
-  void shouldDefaultRetriesInFactory() {
+  void shouldRejectBatchSizeBelowOne() {
+    // when / then
+    assertThatThrownBy(
+            () ->
+                new AwsSecretsManagerStoreConfig(
+                    null, null, null, AwsSecretsManagerStoreConfig.DEFAULT_MAX_RETRIES, true, 0))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("batchSize");
+  }
+
+  @Test
+  void shouldRejectBatchSizeAboveMax() {
+    // when / then
+    assertThatThrownBy(
+            () ->
+                new AwsSecretsManagerStoreConfig(
+                    null, null, null, AwsSecretsManagerStoreConfig.DEFAULT_MAX_RETRIES, true, 21))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("batchSize");
+  }
+
+  @Test
+  void shouldDefaultRetriesAndBatchingInFactory() {
     // when
     final var config = AwsSecretsManagerStoreConfig.of("camunda/");
 
@@ -31,5 +53,7 @@ class AwsSecretsManagerStoreConfigTest {
     assertThat(config.maxRetries()).isEqualTo(AwsSecretsManagerStoreConfig.DEFAULT_MAX_RETRIES);
     assertThat(config.pathPrefix()).isEqualTo("camunda/");
     assertThat(config.region()).isNull();
+    assertThat(config.batchEnabled()).isFalse();
+    assertThat(config.batchSize()).isEqualTo(AwsSecretsManagerStoreConfig.DEFAULT_BATCH_SIZE);
   }
 }

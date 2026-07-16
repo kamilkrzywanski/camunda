@@ -11,6 +11,7 @@ import static io.camunda.secretstore.SecretErrorCode.ACCESS_DENIED;
 import static io.camunda.secretstore.SecretErrorCode.INVALID_REF;
 import static io.camunda.secretstore.SecretErrorCode.NOT_FOUND;
 
+import io.camunda.secretstore.SecretErrorCode;
 import io.camunda.secretstore.SecretResolutionResult;
 import io.camunda.secretstore.SecretResolutionResult.Failed;
 import io.camunda.secretstore.SecretResolutionResult.Resolved;
@@ -23,6 +24,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
@@ -33,6 +35,7 @@ import software.amazon.awssdk.retries.DefaultRetryStrategy;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.secretsmanager.model.APIErrorType;
 import software.amazon.awssdk.services.secretsmanager.model.BatchGetSecretValueRequest;
+import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueRequest;
 import software.amazon.awssdk.services.secretsmanager.model.ListSecretsRequest;
 import software.amazon.awssdk.services.secretsmanager.model.SecretsManagerException;
 
@@ -47,8 +50,10 @@ import software.amazon.awssdk.services.secretsmanager.model.SecretsManagerExcept
  * Failed} results. Store-wide failures (connectivity, throttling after retries, service errors) are
  * surfaced as {@link SecretStoreUnavailableException} so callers can retry or back off.
  *
- * <p>{@link #resolve} batches requests via {@code BatchGetSecretValue} ({@value #BATCH_SIZE} secret
- * ids per call, AWS's per-call limit) instead of one API call per reference.
+ * <p>{@link #resolve} issues one {@code GetSecretValue} call per reference by default. Batching via
+ * {@code BatchGetSecretValue} is opt-in (see {@link AwsSecretsManagerStoreConfig#batchEnabled()}),
+ * since it requires the {@code secretsmanager:BatchGetSecretValue} IAM action in addition to {@code
+ * GetSecretValue}, which not every deployment's IAM policy grants.
  *
  * <p>This class is thread-safe: {@link SecretsManagerClient} is thread-safe and no mutable state is
  * kept between calls.
@@ -58,21 +63,40 @@ public final class AwsSecretsManagerSecretStore
 
   private static final Logger LOG = LoggerFactory.getLogger(AwsSecretsManagerSecretStore.class);
 
-  /** Maximum number of secret ids AWS accepts per {@code BatchGetSecretValue} call. */
-  private static final int BATCH_SIZE = 20;
-
   private final SecretsManagerClient client;
   private final String pathPrefix;
+  private final boolean batchEnabled;
+  private final int batchSize;
 
   /**
-   * Creates a store using an already-built client. Primarily for testing; production code should
-   * use {@link #fromConfig(AwsSecretsManagerStoreConfig)}.
+   * Creates a store using an already-built client, with batching disabled. Primarily for testing;
+   * production code should use {@link #fromConfig(AwsSecretsManagerStoreConfig)}.
+   */
+  public AwsSecretsManagerSecretStore(
+      final SecretsManagerClient client, final @Nullable String pathPrefix) {
+    this(client, pathPrefix, false, AwsSecretsManagerStoreConfig.DEFAULT_BATCH_SIZE);
+  }
+
+  /**
+   * Creates a store using an already-built client, with explicit batching control. Primarily for
+   * testing; production code should use {@link #fromConfig(AwsSecretsManagerStoreConfig)}.
    */
   public AwsSecretsManagerSecretStore(
       final SecretsManagerClient client,
-      final @org.jspecify.annotations.Nullable String pathPrefix) {
+      final @Nullable String pathPrefix,
+      final boolean batchEnabled,
+      final int batchSize) {
+    if (batchSize < 1 || batchSize > AwsSecretsManagerStoreConfig.MAX_BATCH_SIZE) {
+      throw new IllegalArgumentException(
+          "batchSize must be between 1 and "
+              + AwsSecretsManagerStoreConfig.MAX_BATCH_SIZE
+              + ", but was "
+              + batchSize);
+    }
     this.client = client;
     this.pathPrefix = pathPrefix == null ? "" : pathPrefix;
+    this.batchEnabled = batchEnabled;
+    this.batchSize = batchSize;
   }
 
   /**
@@ -104,7 +128,8 @@ public final class AwsSecretsManagerSecretStore
       throw new SecretStoreUnavailableException(
           "Failed to initialize AWS Secrets Manager client: " + e.getMessage(), e);
     }
-    return new AwsSecretsManagerSecretStore(client, config.pathPrefix());
+    return new AwsSecretsManagerSecretStore(
+        client, config.pathPrefix(), config.batchEnabled(), config.batchSize());
   }
 
   @Override
@@ -119,9 +144,40 @@ public final class AwsSecretsManagerSecretStore
     for (final var ref : refs) {
       refsBySecretId.put(secretId(ref.name()), ref);
     }
+    return batchEnabled ? resolveBatched(refsBySecretId) : resolveOneByOne(refsBySecretId);
+  }
+
+  private Map<AwsSecretsManagerSecretReference, SecretResolutionResult> resolveOneByOne(
+      final Map<String, AwsSecretsManagerSecretReference> refsBySecretId) {
     final Map<AwsSecretsManagerSecretReference, SecretResolutionResult> results =
-        new LinkedHashMap<>(refs.size());
-    for (final var batch : partition(refsBySecretId.keySet(), BATCH_SIZE)) {
+        new LinkedHashMap<>(refsBySecretId.size());
+    for (final var entry : refsBySecretId.entrySet()) {
+      results.put(entry.getValue(), resolveSingle(entry.getKey()));
+    }
+    return results;
+  }
+
+  private SecretResolutionResult resolveSingle(final String secretId) {
+    try {
+      final var response =
+          client.getSecretValue(GetSecretValueRequest.builder().secretId(secretId).build());
+      return toResolutionResult(secretId, response.secretString());
+    } catch (final SecretsManagerException e) {
+      final var classified = classifyPerSecretError(errorCodeOf(e));
+      if (classified != null) {
+        return new Failed(classified, "Secret '" + secretId + "': " + e.getMessage(), e);
+      }
+      throw storeUnavailable(e);
+    } catch (final SdkClientException e) {
+      throw storeUnavailable(e);
+    }
+  }
+
+  private Map<AwsSecretsManagerSecretReference, SecretResolutionResult> resolveBatched(
+      final Map<String, AwsSecretsManagerSecretReference> refsBySecretId) {
+    final Map<AwsSecretsManagerSecretReference, SecretResolutionResult> results =
+        new LinkedHashMap<>(refsBySecretId.size());
+    for (final var batch : partition(refsBySecretId.keySet(), batchSize)) {
       resolveBatch(batch, refsBySecretId, results);
     }
     return results;
@@ -142,15 +198,7 @@ public final class AwsSecretsManagerSecretStore
           continue;
         }
         pending.remove(entry.name());
-        final var value = entry.secretString();
-        results.put(
-            ref,
-            value == null
-                ? new Failed(
-                    INVALID_REF,
-                    "Secret '" + entry.name() + "' has no string value (binary secret)",
-                    null)
-                : new Resolved(value));
+        results.put(ref, toResolutionResult(entry.name(), entry.secretString()));
       }
       for (final var error : response.errors()) {
         final var ref = refsBySecretId.get(error.secretId());
@@ -181,13 +229,45 @@ public final class AwsSecretsManagerSecretStore
     }
   }
 
+  private static SecretResolutionResult toResolutionResult(
+      final String secretId, final @Nullable String secretString) {
+    if (secretString == null) {
+      // Binary secrets are not supported for string resolution.
+      return new Failed(
+          INVALID_REF, "Secret '" + secretId + "' has no string value (binary secret)", null);
+    }
+    return new Resolved(secretString);
+  }
+
   private static SecretResolutionResult mapBatchError(final APIErrorType error) {
     final var message = "Secret '" + error.secretId() + "': " + error.message();
-    return switch (error.errorCode()) {
-      case "ResourceNotFoundException" -> new Failed(NOT_FOUND, message, null);
-      case "DecryptionFailure", "AccessDeniedException" -> new Failed(ACCESS_DENIED, message, null);
-      default -> new Failed(INVALID_REF, message, null);
+    final var classified = classifyPerSecretError(error.errorCode());
+    return new Failed(classified != null ? classified : INVALID_REF, message, null);
+  }
+
+  /**
+   * Classifies a known per-secret AWS error code (missing secret, access denied, invalid
+   * reference), or returns {@code null} if the code isn't one of those — meaning it's a store-wide
+   * problem (throttling exhausted, internal service error) that callers must not silently swallow
+   * as a per-secret failure.
+   */
+  private static @Nullable SecretErrorCode classifyPerSecretError(
+      final @Nullable String errorCode) {
+    if (errorCode == null) {
+      return null;
+    }
+    return switch (errorCode) {
+      case "ResourceNotFoundException" -> NOT_FOUND;
+      case "InvalidParameterException", "InvalidRequestException" -> INVALID_REF;
+      case "DecryptionFailure", "DecryptionFailureException", "AccessDeniedException" ->
+          ACCESS_DENIED;
+      default -> errorCode.contains("AccessDenied") ? ACCESS_DENIED : null;
     };
+  }
+
+  private static @Nullable String errorCodeOf(final SecretsManagerException e) {
+    final var details = e.awsErrorDetails();
+    return details != null ? details.errorCode() : null;
   }
 
   private static List<List<String>> partition(final Collection<String> items, final int size) {
