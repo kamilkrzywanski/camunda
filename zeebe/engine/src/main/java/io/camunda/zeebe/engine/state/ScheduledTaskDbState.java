@@ -11,6 +11,8 @@ import io.camunda.zeebe.db.TransactionContext;
 import io.camunda.zeebe.db.ZeebeDb;
 import io.camunda.zeebe.engine.state.batchoperation.DbBatchOperationState;
 import io.camunda.zeebe.engine.state.deployment.DbDeploymentState;
+import io.camunda.zeebe.engine.state.immutable.SecretReferenceState;
+import io.camunda.zeebe.engine.state.secretreference.DbSecretReferenceState;
 import io.camunda.zeebe.engine.state.distribution.DbDistributionState;
 import io.camunda.zeebe.engine.state.immutable.BatchOperationState;
 import io.camunda.zeebe.engine.state.immutable.DeploymentState;
@@ -53,6 +55,7 @@ public final class ScheduledTaskDbState implements ScheduledTaskState {
   private final UserTaskState userTaskState;
   private final BatchOperationState batchOperationState;
   private final DbRoutingState routingState;
+  private final SecretReferenceState secretReferenceState;
 
   public ScheduledTaskDbState(
       final ZeebeDb<ZbColumnFamilies> zeebeDb,
@@ -80,6 +83,12 @@ public final class ScheduledTaskDbState implements ScheduledTaskState {
     userTaskState = new DbUserTaskState(zeebeDb, transactionContext);
     batchOperationState = new DbBatchOperationState(zeebeDb, transactionContext);
     routingState = new DbRoutingState(zeebeDb, transactionContext);
+    secretReferenceState = new DbSecretReferenceState(zeebeDb, transactionContext);
+  }
+
+  @Override
+  public SecretReferenceState getSecretReferenceState() {
+    return secretReferenceState;
   }
 
   @Override
