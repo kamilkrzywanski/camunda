@@ -14,6 +14,8 @@ import io.atomix.primitive.partition.impl.DefaultPartitionManagementService;
 import io.atomix.raft.partition.RaftPartition;
 import io.camunda.cluster.PartitionId;
 import io.camunda.search.clients.SearchClientsProxy;
+import io.camunda.secretstore.SecretCache;
+import io.camunda.secretstore.SecretStore;
 import io.camunda.security.auth.BrokerRequestAuthorizationConverter;
 import io.camunda.security.configuration.EngineSecurityConfig;
 import io.camunda.zeebe.broker.PartitionListener;
@@ -84,6 +86,8 @@ public final class PartitionManagerImpl
   private final MeterRegistry brokerMeterRegistry;
   private final PartitionScalingChangeExecutor scalingExecutor;
   private final AtomixServerTransport gatewayBrokerTransport;
+  private final Map<String, SecretStore> secretStores;
+  private final Map<String, SecretCache> secretCaches;
 
   public PartitionManagerImpl(
       final String partitionGroup,
@@ -108,7 +112,9 @@ public final class PartitionManagerImpl
       final SearchClientsProxy searchClientsProxy,
       final BrokerRequestAuthorizationConverter brokerRequestAuthorizationConverter,
       final FeatureFlags featureFlags,
-      final TopologyManagerImpl topologyManager) {
+      final TopologyManagerImpl topologyManager,
+      final Map<String, SecretStore> secretStores,
+      final Map<String, SecretCache> secretCaches) {
     this.partitionGroup = partitionGroup;
     this.concurrencyControl = concurrencyControl;
     this.actorSchedulingService = actorSchedulingService;
@@ -120,6 +126,8 @@ public final class PartitionManagerImpl
     this.diskSpaceUsageMonitor = diskSpaceUsageMonitor;
     this.brokerClient = brokerClient;
     this.gatewayBrokerTransport = gatewayBrokerTransport;
+    this.secretStores = secretStores;
+    this.secretCaches = secretCaches;
     scalingExecutor = new BrokerClientPartitionScalingExecutor(brokerClient, concurrencyControl);
     brokerMeterRegistry = meterRegistry;
 
@@ -147,7 +155,9 @@ public final class PartitionManagerImpl
                 : null,
             brokerRequestAuthorizationConverter,
             clusterConfigurationService,
-            rocksDbResources);
+            rocksDbResources,
+            secretStores,
+            secretCaches);
     managementService =
         new DefaultPartitionManagementService(
             clusterServices.getMembershipService(), clusterServices.getCommunicationService());

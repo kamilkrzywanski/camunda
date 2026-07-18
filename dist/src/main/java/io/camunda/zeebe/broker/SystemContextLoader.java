@@ -8,10 +8,13 @@
 package io.camunda.zeebe.broker;
 
 import io.atomix.cluster.AtomixCluster;
+import io.camunda.application.commons.secrets.SecretStoreRegistry;
 import io.camunda.configuration.Camunda;
 import io.camunda.configuration.beanoverrides.BrokerBasedPropertiesOverride;
 import io.camunda.configuration.physicaltenants.PhysicalTenantResolver;
 import io.camunda.search.clients.SearchClientsProxy;
+import io.camunda.secretstore.SecretCache;
+import io.camunda.secretstore.SecretStore;
 import io.camunda.security.api.context.OidcClaimsProvider;
 import io.camunda.security.api.model.config.AuthenticationConfiguration;
 import io.camunda.security.auth.BrokerRequestAuthorizationConverter;
@@ -31,11 +34,13 @@ import io.camunda.zeebe.util.jar.ExternalJarLoadException;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
@@ -71,6 +76,7 @@ public final class SystemContextLoader {
   private NodeIdProvider nodeIdProvider;
   private Path workingDirectory;
   private List<ExporterDescriptor> exporterDescriptors;
+  private Map<String, SecretStoreRegistry> secretStoreRegistries = Collections.emptyMap();
 
   public SystemContextLoader withShutdownTimeout(final Duration shutdownTimeout) {
     this.shutdownTimeout = shutdownTimeout;
@@ -173,9 +179,20 @@ public final class SystemContextLoader {
     return this;
   }
 
+  public SystemContextLoader withSecretStoreRegistries(
+      final Map<String, SecretStoreRegistry> secretStoreRegistries) {
+    if (secretStoreRegistries != null) {
+      this.secretStoreRegistries = secretStoreRegistries;
+    }
+    return this;
+  }
+
   public SystemContext createSystemContext() {
     final Map<String, PhysicalTenantContext> physicalTenantContexts =
-        physicalTenantResolver.mapValues(this::buildPhysicalTenantContext);
+        physicalTenantResolver.getAll().entrySet().stream()
+            .collect(
+                Collectors.toUnmodifiableMap(
+                    Map.Entry::getKey, e -> buildPhysicalTenantContext(e.getKey(), e.getValue())));
 
     return new SystemContext(
         shutdownTimeout,
@@ -194,7 +211,8 @@ public final class SystemContextLoader {
         physicalTenantResolver);
   }
 
-  private PhysicalTenantContext buildPhysicalTenantContext(final Camunda camunda) {
+  private PhysicalTenantContext buildPhysicalTenantContext(
+      final String tenantId, final Camunda camunda) {
     final var s = camunda.getSecurity();
     final var securityConfig =
         new EngineSecurityConfig(
@@ -228,8 +246,19 @@ public final class SystemContextLoader {
     final var exporterRepository =
         buildExporterRepository(predefinedExporterRepository(), brokerConfig);
 
+    final var registry = secretStoreRegistries.get(tenantId);
+    final Map<String, SecretStore> stores =
+        registry != null ? registry.getStores() : Collections.emptyMap();
+    final Map<String, SecretCache> caches =
+        registry != null ? registry.getCaches() : Collections.emptyMap();
     return new PhysicalTenantContext(
-        securityConfig, authorizationConverter, featureFlags, brokerConfig, exporterRepository);
+        securityConfig,
+        authorizationConverter,
+        featureFlags,
+        brokerConfig,
+        exporterRepository,
+        stores,
+        caches);
   }
 
   private ExporterRepository predefinedExporterRepository() {

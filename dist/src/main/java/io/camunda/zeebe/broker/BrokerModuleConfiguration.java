@@ -10,6 +10,7 @@ package io.camunda.zeebe.broker;
 import io.atomix.cluster.AtomixCluster;
 import io.camunda.application.commons.configuration.BrokerBasedConfiguration;
 import io.camunda.application.commons.configuration.WorkingDirectoryConfiguration.WorkingDirectory;
+import io.camunda.application.commons.secrets.SecretStoreRegistry;
 import io.camunda.configuration.UnifiedConfiguration;
 import io.camunda.configuration.physicaltenants.PhysicalTenantResolver;
 import io.camunda.search.clients.SearchClientsProxy;
@@ -30,6 +31,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Function;
 import org.slf4j.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -73,6 +75,7 @@ public class BrokerModuleConfiguration implements CloseableSilently {
   private final SearchClientsProxy searchClientsProxy;
   private final NodeIdProvider nodeIdProvider;
   private final WorkingDirectory workingDirectory;
+  private final Map<String, SecretStoreRegistry> secretStoreRegistries;
 
   private Broker broker;
 
@@ -95,7 +98,8 @@ public class BrokerModuleConfiguration implements CloseableSilently {
           final ScopedOidcClaimsProviderFactory scopedOidcClaimsProviderFactory,
       @Autowired(required = false) final SearchClientsProxy searchClientsProxy,
       final NodeIdProvider nodeIdProvider,
-      final WorkingDirectory workingDirectory) {
+      final WorkingDirectory workingDirectory,
+      @Autowired(required = false) final Map<String, SecretStoreRegistry> secretStoreRegistries) {
     this.configuration = configuration;
     this.springBrokerBridge = springBrokerBridge;
     this.actorScheduler = actorScheduler;
@@ -112,6 +116,8 @@ public class BrokerModuleConfiguration implements CloseableSilently {
     this.searchClientsProxy = searchClientsProxy;
     this.nodeIdProvider = nodeIdProvider;
     this.workingDirectory = workingDirectory;
+    this.secretStoreRegistries =
+        secretStoreRegistries != null ? secretStoreRegistries : Collections.emptyMap();
   }
 
   @Bean(destroyMethod = "close")
@@ -142,6 +148,7 @@ public class BrokerModuleConfiguration implements CloseableSilently {
             .withNodeIdProvider(nodeIdProvider)
             .withWorkingDirectory(workingDirectory.path())
             .withExporterDescriptors(exporterDescriptors)
+            .withSecretStoreRegistries(secretStoreRegistries)
             .createSystemContext();
     springBrokerBridge.registerShutdownHelper(shutdownHelper::initiateShutdown);
     broker = new Broker(systemContext, springBrokerBridge, Collections.emptyList());

@@ -7,16 +7,26 @@
  */
 package io.camunda.zeebe.engine.processing.secretreference;
 
+import io.camunda.secretstore.SecretCache;
+import io.camunda.secretstore.SecretStore;
+import io.camunda.zeebe.engine.EngineConfiguration;
 import io.camunda.zeebe.engine.processing.streamprocessor.TypedRecordProcessors;
+import io.camunda.zeebe.engine.state.immutable.ScheduledTaskState;
 import io.camunda.zeebe.protocol.record.ValueType;
 import io.camunda.zeebe.protocol.record.intent.SecretReferenceIntent;
+import java.util.Map;
+import java.util.function.Supplier;
 
 public final class SecretReferenceProcessors {
 
   private SecretReferenceProcessors() {}
 
   public static void addSecretReferenceProcessors(
-      final TypedRecordProcessors typedRecordProcessors) {
+      final TypedRecordProcessors typedRecordProcessors,
+      final Supplier<ScheduledTaskState> scheduledTaskStateFactory,
+      final Map<String, SecretStore> secretStores,
+      final Map<String, SecretCache> secretCaches,
+      final EngineConfiguration config) {
     typedRecordProcessors.onCommand(
         ValueType.SECRET_REFERENCE,
         SecretReferenceIntent.RESOLUTION_COMPLETE,
@@ -33,5 +43,10 @@ public final class SecretReferenceProcessors {
         ValueType.SECRET_REFERENCE,
         SecretReferenceIntent.BATCH_CREATE_INCIDENTS,
         new SecretReferenceBatchCreateIncidentsProcessor());
+
+    final var scheduler =
+        new SecretResolutionScheduler(
+            scheduledTaskStateFactory, secretStores, secretCaches, config);
+    typedRecordProcessors.withListener(scheduler);
   }
 }
