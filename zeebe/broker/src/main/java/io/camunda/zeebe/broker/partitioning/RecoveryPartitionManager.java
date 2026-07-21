@@ -376,13 +376,6 @@ public final class RecoveryPartitionManager
   }
 
   @Override
-  public ActorFuture<Void> setExporterState(
-      final int partitionId, final ExportingState exportingState) {
-    return CompletableActorFuture.completedExceptionally(
-        new IllegalStateException("Cannot perform setExporterState on a recovering partition"));
-  }
-
-  @Override
   public ActorFuture<Void> deleteExporter(final int partitionId, final String exporterId) {
     return CompletableActorFuture.completedExceptionally(
         new IllegalStateException("Cannot perform deleteExporter on a recovering partition"));
@@ -396,6 +389,13 @@ public final class RecoveryPartitionManager
       final String initializeFrom) {
     return CompletableActorFuture.completedExceptionally(
         new IllegalStateException("Cannot perform enableExporter on a recovering partition"));
+  }
+
+  @Override
+  public ActorFuture<Void> setExportingState(
+      final int partitionId, final ExportingState exportingState) {
+    return CompletableActorFuture.completedExceptionally(
+        new IllegalStateException("Cannot perform setExporterState on a recovering partition"));
   }
 
   @Override
