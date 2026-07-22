@@ -11,8 +11,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 
+import io.camunda.secretstore.NoopSecretStore;
+import io.camunda.secretstore.SecretCache;
+import io.camunda.secretstore.SecretStoreRegistry;
 import io.camunda.zeebe.engine.EngineConfiguration;
-import io.camunda.zeebe.engine.processing.job.SecretResolver.SecretReference;
 import io.camunda.zeebe.engine.util.EngineRule;
 import io.camunda.zeebe.model.bpmn.Bpmn;
 import io.camunda.zeebe.model.bpmn.BpmnModelInstance;
@@ -30,7 +32,7 @@ import io.camunda.zeebe.test.util.record.RecordingExporterTestWatcher;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Set;
+import java.util.Optional;
 import java.util.function.Consumer;
 import org.agrona.MutableDirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
@@ -46,16 +48,37 @@ public final class JobSecretActivationInjectionTest {
   private static final String TASK_ID = "task";
   private static final String JOB_TYPE = "task-type";
 
+  private final Map<String, String> cachedSecrets = new HashMap<>();
+  private boolean failResolution;
+
+  /** Serves the test's cached secrets and simulates a broken cache when the flag is set. */
+  private final SecretCache secretCache =
+      new SecretCache() {
+        @Override
+        public Optional<String> get(final String name) {
+          if (failResolution) {
+            throw new IllegalStateException("resolver exploded");
+          }
+          return Optional.ofNullable(cachedSecrets.get(name));
+        }
+
+        @Override
+        public void put(final String name, final String value) {
+          cachedSecrets.put(name, value);
+        }
+      };
+
   @Rule
   public final EngineRule engine =
-      EngineRule.singlePartition().withSecretResolver(this::resolveFromCachedSecrets);
+      EngineRule.singlePartition()
+          .withSecretStoreRegistry(
+              new SecretStoreRegistry(
+                  Map.of("default", new NoopSecretStore()), Map.of("default", secretCache)));
 
   @Rule
   public final RecordingExporterTestWatcher recordingExporterTestWatcher =
       new RecordingExporterTestWatcher();
 
-  private final Map<String, String> cachedSecrets = new HashMap<>();
-  private boolean failResolution;
   private CommandResponseWriter mockResponseWriter;
   private volatile JobBatchRecord activationResponse;
 
@@ -94,7 +117,7 @@ public final class JobSecretActivationInjectionTest {
 
   @Test
   public void shouldNotActivateJobWhenSecretIsNotCached() {
-    // given - the secret has no cached value (empty resolver)
+    // given - the secret has no cached value (empty cache)
     deploy(t -> t.zeebeInputExpression("\"Bearer \" + camunda.secrets.token", "authorization"));
     createInstanceAndAwaitJob();
 
@@ -247,21 +270,6 @@ public final class JobSecretActivationInjectionTest {
     // and - no exported record (including the incident) leaks the resolved secret value
     assertThat(RecordingExporter.getRecords())
         .noneMatch(record -> record.toString().contains(value));
-  }
-
-  private Map<SecretReference, String> resolveFromCachedSecrets(
-      final Set<SecretReference> references) {
-    if (failResolution) {
-      throw new IllegalStateException("resolver exploded");
-    }
-    final Map<SecretReference, String> values = new HashMap<>();
-    for (final SecretReference reference : references) {
-      final String value = cachedSecrets.get(reference.secretReference());
-      if (value != null) {
-        values.put(reference, value);
-      }
-    }
-    return values;
   }
 
   private long createInstanceAndAwaitJob() {

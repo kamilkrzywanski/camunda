@@ -10,6 +10,7 @@ package io.camunda.zeebe.broker.partitioning.startup;
 import io.atomix.cluster.BrokerMemberId;
 import io.atomix.raft.partition.RaftPartition;
 import io.camunda.search.clients.SearchClientsProxy;
+import io.camunda.secretstore.SecretStoreRegistry;
 import io.camunda.security.auth.BrokerRequestAuthorizationConverter;
 import io.camunda.security.configuration.EngineSecurityConfig;
 import io.camunda.zeebe.broker.PartitionListener;
@@ -19,7 +20,6 @@ import io.camunda.zeebe.broker.exporter.repo.ExporterRepository;
 import io.camunda.zeebe.broker.logstreams.state.DbPositionSupplier;
 import io.camunda.zeebe.broker.partitioning.topology.ClusterConfigurationService;
 import io.camunda.zeebe.broker.partitioning.topology.TopologyManagerImpl;
-import io.camunda.zeebe.broker.secret.CachedSecretResolver;
 import io.camunda.zeebe.broker.system.configuration.BrokerCfg;
 import io.camunda.zeebe.broker.system.monitoring.BrokerHealthCheckService;
 import io.camunda.zeebe.broker.system.monitoring.DiskSpaceUsageMonitor;
@@ -82,6 +82,7 @@ import java.io.UncheckedIOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
+import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -109,10 +110,10 @@ public final class ZeebePartitionFactory {
   private final ClusterConfigurationService clusterConfigurationService;
   private final RocksDbResources rocksDbResources;
 
-  // Broker-shared secret resolver: one instance across partitions, caching resolved secret
-  // values keyed by their secret reference. Populated by the background secret-resolution flow
-  // and read on job activation to inject resolved secrets.
-  private final CachedSecretResolver cachedSecretResolver = new CachedSecretResolver();
+  // Shared across this tenant's partitions: the caches are read on job activation to inject
+  // resolved secrets and populated by the background secret-resolution flow. Empty until the
+  // configured per-tenant registry is threaded through, so no secrets resolve yet.
+  private final SecretStoreRegistry secretStoreRegistry = new SecretStoreRegistry(Map.of());
 
   public ZeebePartitionFactory(
       final ActorSchedulingService actorSchedulingService,
@@ -285,7 +286,7 @@ public final class ZeebePartitionFactory {
           jobStreamer,
           searchClientsProxy,
           brokerRequestAuthorizationConverter,
-          cachedSecretResolver);
+          secretStoreRegistry);
     };
   }
 }

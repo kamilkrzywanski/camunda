@@ -7,6 +7,7 @@
  */
 package io.camunda.zeebe.engine.processing.job;
 
+import io.camunda.secretstore.SecretStoreRegistry;
 import io.camunda.zeebe.engine.EngineConfiguration;
 import io.camunda.zeebe.engine.metrics.IncidentMetrics;
 import io.camunda.zeebe.engine.metrics.JobProcessingMetrics;
@@ -36,7 +37,7 @@ public final class JobEventProcessors {
       final InstantSource clock,
       final CslAuthorizationCheck cslCheck,
       final IncidentMetrics incidentMetrics,
-      final SecretResolver secretResolver) {
+      final SecretStoreRegistry secretStoreRegistry) {
 
     final var keyGenerator = processingState.getKeyGenerator();
 
@@ -129,7 +130,7 @@ public final class JobEventProcessors {
                 cslCheck,
                 clock,
                 incidentMetrics,
-                secretResolver))
+                secretStoreRegistry))
         .withListener(
             new JobTimeoutCheckScheduler(
                 scheduledTaskStateFactory.get().getJobState(),

@@ -9,16 +9,19 @@ package io.camunda.zeebe.engine.processing.job;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.camunda.secretstore.InMemorySecretCache;
+import io.camunda.secretstore.NoopSecretStore;
+import io.camunda.secretstore.SecretCache;
+import io.camunda.secretstore.SecretStoreRegistry;
 import io.camunda.zeebe.engine.EngineConfiguration;
+import io.camunda.zeebe.engine.processing.deployment.model.element.SecretReference;
 import io.camunda.zeebe.engine.processing.job.JobSecretInjector.OversizedJob;
-import io.camunda.zeebe.engine.processing.job.SecretResolver.SecretReference;
 import io.camunda.zeebe.msgpack.value.LongValue;
 import io.camunda.zeebe.protocol.impl.encoding.MsgPackConverter;
 import io.camunda.zeebe.protocol.impl.record.value.job.JobBatchRecord;
 import io.camunda.zeebe.protocol.impl.record.value.job.JobRecord;
 import io.camunda.zeebe.util.buffer.BufferUtil;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -30,17 +33,14 @@ final class JobSecretInjectorTest {
   private static final String STORE_ID = "";
 
   private static JobSecretInjector injector(final Map<String, String> cachedSecrets) {
-    return new JobSecretInjector(
-        references -> {
-          final Map<SecretReference, String> values = new HashMap<>();
-          for (final SecretReference reference : references) {
-            final String value = cachedSecrets.get(reference.secretReference());
-            if (value != null) {
-              values.put(reference, value);
-            }
-          }
-          return values;
-        });
+    final var cache = new InMemorySecretCache();
+    cachedSecrets.forEach(cache::put);
+    return new JobSecretInjector(registryWith(cache));
+  }
+
+  private static SecretStoreRegistry registryWith(final SecretCache cache) {
+    return new SecretStoreRegistry(
+        Map.of("default", new NoopSecretStore()), Map.of("default", cache));
   }
 
   private static JobBatchRecord batchWith(final JobRecord... jobs) {
@@ -180,11 +180,17 @@ final class JobSecretInjectorTest {
     }
 
     @Test
-    void shouldRemoveAllSecretJobsWhenResolverThrows() {
+    void shouldRemoveAllSecretJobsWhenCacheLookupThrows() {
       // given
-      final SecretResolver throwingResolver =
-          references -> {
-            throw new IllegalStateException("resolver is broken");
+      final SecretCache throwingCache =
+          new SecretCache() {
+            @Override
+            public Optional<String> get(final String name) {
+              throw new IllegalStateException("cache is broken");
+            }
+
+            @Override
+            public void put(final String name, final String value) {}
           };
       final var batch =
           batchWith(
@@ -193,7 +199,7 @@ final class JobSecretInjectorTest {
 
       // when
       final var preparation =
-          new JobSecretInjector(throwingResolver).removeJobsWithUncachedSecrets(batch);
+          new JobSecretInjector(registryWith(throwingCache)).removeJobsWithUncachedSecrets(batch);
 
       // then - only the job without references stays
       assertThat(variablesOfAllJobs(batch)).containsExactly(Map.of("foo", "bar"));
@@ -203,18 +209,64 @@ final class JobSecretInjectorTest {
     }
 
     @Test
-    void shouldRemoveSecretJobsWithNoopResolver() {
-      // given - the noop resolver has no cached values
+    void shouldRemoveSecretJobsWhenNoStoreIsConfigured() {
+      // given - an empty registry has no caches, so no reference resolves
       final var batch =
           batchWith(
               job(Map.of("auth", "camunda.secrets.token"), ref("token", "/auth")),
               job(Map.of("foo", "bar")));
 
       // when
-      new JobSecretInjector(SecretResolver.noop()).removeJobsWithUncachedSecrets(batch);
+      new JobSecretInjector(new SecretStoreRegistry(Map.of())).removeJobsWithUncachedSecrets(batch);
 
       // then
       assertThat(variablesOfAllJobs(batch)).containsExactly(Map.of("foo", "bar"));
+    }
+
+    @Test
+    void shouldResolveReferenceFromTheStoreItNames() {
+      // given - two stores; the reference names the second store explicitly
+      final var cache = new InMemorySecretCache();
+      cache.put("token", "resolved");
+      final var registry =
+          new SecretStoreRegistry(
+              Map.of("store-a", new NoopSecretStore(), "store-b", new NoopSecretStore()),
+              Map.of("store-a", new InMemorySecretCache(), "store-b", cache));
+      final var batch =
+          batchWith(
+              job(
+                  Map.of("auth", "camunda.secrets.token"),
+                  new SecretRef("store-b", "token", "/auth")));
+
+      // when
+      final var preparation = new JobSecretInjector(registry).removeJobsWithUncachedSecrets(batch);
+
+      // then
+      assertThat(jobKeysOf(batch)).containsExactly(100L);
+      assertThat(preparation.values())
+          .containsEntry(new SecretReference("store-b", "token"), "resolved");
+    }
+
+    @Test
+    void shouldNotResolveReferenceWithoutStoreIdWhenSeveralStoresAreConfigured() {
+      // given - both stores cache the secret, but the reference names no store, which is
+      // ambiguous with more than one configured store
+      final var cacheA = new InMemorySecretCache();
+      cacheA.put("token", "a");
+      final var cacheB = new InMemorySecretCache();
+      cacheB.put("token", "b");
+      final var registry =
+          new SecretStoreRegistry(
+              Map.of("store-a", new NoopSecretStore(), "store-b", new NoopSecretStore()),
+              Map.of("store-a", cacheA, "store-b", cacheB));
+      final var batch =
+          batchWith(job(Map.of("auth", "camunda.secrets.token"), ref("token", "/auth")));
+
+      // when
+      new JobSecretInjector(registry).removeJobsWithUncachedSecrets(batch);
+
+      // then - the job is removed instead of guessing a store
+      assertThat(jobKeysOf(batch)).isEmpty();
     }
 
     @Test

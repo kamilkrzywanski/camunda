@@ -11,6 +11,7 @@ import static io.camunda.zeebe.test.util.record.RecordingExporter.jobRecords;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.camunda.search.clients.SearchClientsProxy;
+import io.camunda.secretstore.SecretStoreRegistry;
 import io.camunda.security.auth.BrokerRequestAuthorizationConverter;
 import io.camunda.security.configuration.EngineSecurityConfig;
 import io.camunda.security.configuration.EngineSecurityConfigurations;
@@ -18,7 +19,6 @@ import io.camunda.zeebe.db.DbKey;
 import io.camunda.zeebe.db.DbValue;
 import io.camunda.zeebe.engine.EngineConfiguration;
 import io.camunda.zeebe.engine.processing.EngineProcessors;
-import io.camunda.zeebe.engine.processing.job.SecretResolver;
 import io.camunda.zeebe.engine.processing.message.command.SubscriptionCommandSender;
 import io.camunda.zeebe.engine.processing.streamprocessor.JobStreamer;
 import io.camunda.zeebe.engine.state.DefaultZeebeDbFactory;
@@ -133,7 +133,7 @@ public final class EngineRule extends ExternalResource {
 
   private long lastProcessedPosition = -1L;
   private JobStreamer jobStreamer = JobStreamer.noop();
-  private SecretResolver secretResolver = SecretResolver.noop();
+  private SecretStoreRegistry secretStoreRegistry = new SecretStoreRegistry(Map.of());
 
   private final FeatureFlags featureFlags = FeatureFlags.createDefaultForTests();
   private ArrayList<TestInterPartitionCommandSender> interPartitionCommandSenders;
@@ -250,8 +250,8 @@ public final class EngineRule extends ExternalResource {
     return this;
   }
 
-  public EngineRule withSecretResolver(final SecretResolver secretResolver) {
-    this.secretResolver = secretResolver;
+  public EngineRule withSecretStoreRegistry(final SecretStoreRegistry secretStoreRegistry) {
+    this.secretStoreRegistry = secretStoreRegistry;
     return this;
   }
 
@@ -382,7 +382,7 @@ public final class EngineRule extends ExternalResource {
                         jobStreamer,
                         searchClientsProxy,
                         brokerRequestAuthorizationConverter,
-                        secretResolver)
+                        secretStoreRegistry)
                     .withListener(
                         new ProcessingExporterTransistor(
                             environmentRule.getLogStream(partitionId)));

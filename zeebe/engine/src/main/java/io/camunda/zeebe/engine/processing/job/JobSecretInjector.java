@@ -13,13 +13,16 @@ import com.fasterxml.jackson.core.JsonPointer;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.camunda.secretstore.SecretCache;
+import io.camunda.secretstore.SecretStoreRegistry;
 import io.camunda.zeebe.engine.EngineConfiguration;
-import io.camunda.zeebe.engine.processing.job.SecretResolver.SecretReference;
+import io.camunda.zeebe.engine.processing.deployment.model.element.SecretReference;
 import io.camunda.zeebe.protocol.impl.record.value.job.JobBatchRecord;
 import io.camunda.zeebe.protocol.impl.record.value.job.JobRecord;
 import io.camunda.zeebe.protocol.impl.record.value.job.JobSecretReference;
 import io.camunda.zeebe.util.buffer.BufferUtil;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -37,8 +40,9 @@ import org.slf4j.LoggerFactory;
  *
  * <ol>
  *   <li>{@link #removeJobsWithUncachedSecrets} looks up the secret references of every job (stored
- *       on the {@link JobRecord} at creation) in the secret cache via the {@link SecretResolver}
- *       and removes the jobs with an uncached reference from the batch, so they are not activated.
+ *       on the {@link JobRecord} at creation) in the per-store secret caches of the {@link
+ *       SecretStoreRegistry} and removes the jobs with an uncached reference from the batch, so
+ *       they are not activated.
  *   <li>{@link #injectSecretValues} replaces the placeholder text {@code camunda.secrets.<name>} of
  *       the remaining jobs with the cached value on a response-only copy of the batch, at the JSON
  *       pointer recorded for each reference. Jobs whose values would grow the response beyond the
@@ -66,10 +70,10 @@ public final class JobSecretInjector {
   /** Reads and writes the msgpack encoding of job variables as Jackson trees. */
   private final ObjectMapper variablesMapper = new ObjectMapper(new MessagePackFactory());
 
-  private final SecretResolver secretResolver;
+  private final Map<String, SecretCache> caches;
 
-  public JobSecretInjector(final SecretResolver secretResolver) {
-    this.secretResolver = secretResolver;
+  public JobSecretInjector(final SecretStoreRegistry secretStoreRegistry) {
+    caches = secretStoreRegistry.getCaches();
   }
 
   /**
@@ -145,9 +149,21 @@ public final class JobSecretInjector {
     return Optional.empty();
   }
 
+  /**
+   * Returns the cached value for every given reference that is currently cached; references without
+   * a cached value are absent from the returned map. If a cache lookup fails, no reference
+   * resolves, so every job with secret references is removed from the batch.
+   */
   private Map<SecretReference, String> resolve(final Set<SecretReference> references) {
     try {
-      return secretResolver.resolve(references);
+      final Map<SecretReference, String> values = HashMap.newHashMap(references.size());
+      for (final SecretReference reference : references) {
+        final SecretCache cache = cacheOf(reference.storeId());
+        if (cache != null) {
+          cache.get(reference.name()).ifPresent(value -> values.put(reference, value));
+        }
+      }
+      return values;
     } catch (final RuntimeException e) {
       LOGGER.warn(
           "Failed to look up the {} secret reference(s) of a job activation batch; "
@@ -156,6 +172,19 @@ public final class JobSecretInjector {
           e);
       return Map.of();
     }
+  }
+
+  /**
+   * Returns the cache of the store holding the referenced secret, or {@code null} when no store
+   * matches. The {@code camunda.secrets.<name>} syntax carries no store dimension yet, so an empty
+   * store ID addresses the sole configured store; with several stores an empty store ID is
+   * ambiguous and does not resolve.
+   */
+  private SecretCache cacheOf(final String storeId) {
+    if (!storeId.isEmpty()) {
+      return caches.get(storeId);
+    }
+    return caches.size() == 1 ? caches.values().iterator().next() : null;
   }
 
   private static boolean hasUncachedReference(
