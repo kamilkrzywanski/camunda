@@ -17,6 +17,8 @@ import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.ExporterDeleteRequest;
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.ExporterDisableRequest;
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.ExporterEnableRequest;
+import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.FailbackRequest;
+import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.FailoverRequest;
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.ForceRemoveBrokersRequest;
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.JoinPartitionRequest;
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.LeavePartitionRequest;
@@ -250,6 +252,25 @@ public final class ClusterConfigurationManagementRequestsHandler
     return handleRequest(
         zoneMigrationRequest.dryRun(),
         new ZoneMigrationRequestTransformer(zoneMigrationRequest.zone()));
+  }
+
+  @Override
+  public ActorFuture<ClusterConfigurationChangeResponse> failover(
+      final FailoverRequest failoverRequest) {
+    return handleRequest(
+        failoverRequest.dryRun(), new ForceRemoveZoneTransformer(failoverRequest.zoneId()));
+  }
+
+  @Override
+  public ActorFuture<ClusterConfigurationChangeResponse> failback(
+      final FailbackRequest failbackRequest) {
+    return handleRequest(
+        failbackRequest.dryRun(),
+        new AddZoneTransformer(
+            failbackRequest.zoneId(),
+            failbackRequest.numberOfReplicas(),
+            failbackRequest.priority(),
+            failbackRequest.brokers()));
   }
 
   private ActorFuture<ClusterConfigurationChangeResponse> handleRequest(

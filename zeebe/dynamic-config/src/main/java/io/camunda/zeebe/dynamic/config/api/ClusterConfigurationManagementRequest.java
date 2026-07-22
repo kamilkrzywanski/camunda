@@ -120,6 +120,21 @@ public sealed interface ClusterConfigurationManagementRequest {
   record ForceRemoveBrokersRequest(Set<MemberId> membersToRemove, boolean dryRun)
       implements ClusterConfigurationManagementRequest {}
 
+  /**
+   * Force-evicts a failed zone's brokers from the member set and drops the zone from the persisted
+   * {@code ZoneAwareConfig}, in one atomic change.
+   */
+  record FailoverRequest(String zoneId, boolean dryRun)
+      implements ClusterConfigurationManagementRequest {}
+
+  /**
+   * Restores a previously failed-over zone: re-adds the operator-supplied brokers and re-includes
+   * the zone in the persisted {@code ZoneAwareConfig}, in one atomic change.
+   */
+  record FailbackRequest(
+      String zoneId, int numberOfReplicas, int priority, Set<MemberId> brokers, boolean dryRun)
+      implements ClusterConfigurationManagementRequest {}
+
   record ExporterDisableRequest(String exporterId, boolean dryRun)
       implements ClusterConfigurationManagementRequest {}
 

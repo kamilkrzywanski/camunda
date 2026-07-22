@@ -16,6 +16,8 @@ import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.ExporterDeleteRequest;
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.ExporterDisableRequest;
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.ExporterEnableRequest;
+import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.FailbackRequest;
+import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.FailoverRequest;
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.ForceRemoveBrokersRequest;
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.JoinPartitionRequest;
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.LeavePartitionRequest;
@@ -253,6 +255,28 @@ public final class ClusterConfigurationManagementRequestSender {
         ClusterConfigurationRequestTopics.ZONE_MIGRATION.topic(),
         request,
         serializer::encodeClusterZoneMigrationRequest,
+        serializer::decodeTopologyChangeResponse,
+        coordinatorSupplier.getDefaultCoordinator(),
+        TIMEOUT);
+  }
+
+  public CompletableFuture<Either<ErrorResponse, ClusterConfigurationChangeResponse>> failover(
+      final FailoverRequest request) {
+    return communicationService.send(
+        ClusterConfigurationRequestTopics.FAILOVER.topic(),
+        request,
+        serializer::encodeFailoverRequest,
+        serializer::decodeTopologyChangeResponse,
+        coordinatorSupplier.getDefaultCoordinator(),
+        TIMEOUT);
+  }
+
+  public CompletableFuture<Either<ErrorResponse, ClusterConfigurationChangeResponse>> failback(
+      final FailbackRequest request) {
+    return communicationService.send(
+        ClusterConfigurationRequestTopics.FAILBACK.topic(),
+        request,
+        serializer::encodeFailbackRequest,
         serializer::decodeTopologyChangeResponse,
         coordinatorSupplier.getDefaultCoordinator(),
         TIMEOUT);

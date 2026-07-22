@@ -11,6 +11,8 @@ import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationChangeResponse;
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest;
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.BrokerScaleRequest;
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.ClusterZoneMigrationRequest;
+import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.FailbackRequest;
+import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.FailoverRequest;
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.ModeChangeRequest;
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.PurgeRequest;
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.RestoreRequest;
@@ -65,6 +67,10 @@ public interface ClusterConfigurationRequestsSerializer {
       UpdatePartitionDistributorConfigRequest request);
 
   byte[] encodeClusterZoneMigrationRequest(ClusterZoneMigrationRequest request);
+
+  byte[] encodeFailoverRequest(FailoverRequest request);
+
+  byte[] encodeFailbackRequest(FailbackRequest request);
 
   ClusterConfigurationManagementRequest.AddMembersRequest decodeAddMembersRequest(
       byte[] encodedState);
@@ -123,6 +129,10 @@ public interface ClusterConfigurationRequestsSerializer {
       byte[] bytes);
 
   ClusterZoneMigrationRequest decodeClusterZoneMigrationRequest(byte[] bytes);
+
+  FailoverRequest decodeFailoverRequest(byte[] bytes);
+
+  FailbackRequest decodeFailbackRequest(byte[] bytes);
 
   byte[] encodeModeChangeRequest(ModeChangeRequest modeChangeRequest);
 

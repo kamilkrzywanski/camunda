@@ -29,7 +29,9 @@ public enum ClusterConfigurationRequestTopics {
   UPDATE_PARTITION_DISTRIBUTION("topology-cluster-update-partition-distribution"),
   MODE_CHANGE("topology-mode-change"),
   RESTORE("cluster-restore"),
-  ZONE_MIGRATION("topology-cluster-zone-migration");
+  ZONE_MIGRATION("topology-cluster-zone-migration"),
+  FAILOVER("topology-cluster-failover"),
+  FAILBACK("topology-cluster-failback");
 
   private final String topic;
 

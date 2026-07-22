@@ -20,6 +20,8 @@ import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.ExporterDeleteRequest;
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.ExporterDisableRequest;
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.ExporterEnableRequest;
+import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.FailbackRequest;
+import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.FailoverRequest;
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.ForceRemoveBrokersRequest;
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.JoinPartitionRequest;
 import io.camunda.zeebe.dynamic.config.api.ClusterConfigurationManagementRequest.LeavePartitionRequest;
@@ -1098,6 +1100,27 @@ public class ProtoBufSerializer
   }
 
   @Override
+  public byte[] encodeFailoverRequest(final FailoverRequest request) {
+    return Requests.FailoverRequest.newBuilder()
+        .setZoneId(request.zoneId())
+        .setDryRun(request.dryRun())
+        .build()
+        .toByteArray();
+  }
+
+  @Override
+  public byte[] encodeFailbackRequest(final FailbackRequest request) {
+    return Requests.FailbackRequest.newBuilder()
+        .setZoneId(request.zoneId())
+        .setNumberOfReplicas(request.numberOfReplicas())
+        .setPriority(request.priority())
+        .addAllBrokers(request.brokers().stream().map(MemberId::id).toList())
+        .setDryRun(request.dryRun())
+        .build()
+        .toByteArray();
+  }
+
+  @Override
   public AddMembersRequest decodeAddMembersRequest(final byte[] encodedState) {
     try {
       final var addMemberRequest = Requests.AddMembersRequest.parseFrom(encodedState);
@@ -1425,6 +1448,33 @@ public class ProtoBufSerializer
       throw new DecodingFailed(e);
     }
     return new ClusterZoneMigrationRequest(proto.getZone(), proto.getDryRun());
+  }
+
+  @Override
+  public FailoverRequest decodeFailoverRequest(final byte[] bytes) {
+    final Requests.FailoverRequest proto;
+    try {
+      proto = Requests.FailoverRequest.parseFrom(bytes);
+    } catch (final InvalidProtocolBufferException e) {
+      throw new DecodingFailed(e);
+    }
+    return new FailoverRequest(proto.getZoneId(), proto.getDryRun());
+  }
+
+  @Override
+  public FailbackRequest decodeFailbackRequest(final byte[] bytes) {
+    final Requests.FailbackRequest proto;
+    try {
+      proto = Requests.FailbackRequest.parseFrom(bytes);
+    } catch (final InvalidProtocolBufferException e) {
+      throw new DecodingFailed(e);
+    }
+    return new FailbackRequest(
+        proto.getZoneId(),
+        proto.getNumberOfReplicas(),
+        proto.getPriority(),
+        proto.getBrokersList().stream().map(MemberId::from).collect(Collectors.toSet()),
+        proto.getDryRun());
   }
 
   @Override
