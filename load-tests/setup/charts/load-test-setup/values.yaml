@@ -141,11 +141,15 @@ elasticsearch:
 
 
 # -- Configure the Keycloak deployment.
-# Note: Keycloak itself is not yet deployed via this mechanism ; only the PostgreSQL
-# cluster used by Keycloak is currently configurable.
 keycloak:
   # -- Whether to deploy Keycloak or not.
   enabled: true
+
+  # -- The Keycloak image to be deployed.
+  image:
+    registry: europe-west1-docker.pkg.dev/camunda-benchmark
+    repository: dockerhub/camunda/keycloak
+    tag: quay-optimized-26.6.4
 
   # -- CPU and memory resource requests and limits for the Keycloak instance.
   resources:
@@ -155,6 +159,25 @@ keycloak:
     limits:
       cpu: "2"
       memory: 2Gi
+
+  http:
+    # -- The port Keycloak listens on for HTTP traffic.
+    # Use a non-default port to avoid conflict with Zeebe Gateway on port 8080
+    # during port-forwarding.
+    port: 18080
+
+  # -- Node selector labels for Keycloak pod scheduling.
+  # The top-level `topologyZone` value is also applied as
+  # `topology.kubernetes.io/zone`.
+  nodeSelector:
+    component: benchmark-n2-standard-4
+
+  # -- Tolerations applied to the Keycloak pod.
+  tolerations:
+    - key: nodepool
+      operator: Equal
+      value: n2-standard-4
+      effect: NoSchedule
 
   adminUser:
     # -- The name of the initial "admin" user in Keycloak.

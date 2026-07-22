@@ -6,7 +6,9 @@ metadata:
   namespace: {{ .Values.keycloak.namespace }}
   name: {{ .Release.Namespace }}
 spec:
-  image: europe-west1-docker.pkg.dev/camunda-benchmark/dockerhub/camunda/keycloak:quay-optimized-26.6.4
+  {{- with .Values.keycloak.image }}
+  image: "{{ .registry }}/{{ .repository }}:{{ .tag }}"
+  {{- end }}
 
   imagePullSecrets:
     # Required if the image is stored on Harbor.
@@ -32,9 +34,9 @@ spec:
 
   http:
     httpEnabled: true
-    # Use port 18080 to avoid conflict with Zeebe Gateway on port 8080 during
-    # port-forwarding.
-    httpPort: 18080
+    # Use a non-default port to avoid conflict with Zeebe Gateway on port 8080
+    # during port-forwarding.
+    httpPort: {{ .Values.keycloak.http.port }}
     serviceName: "{{ .Release.Namespace }}"
 
   additionalOptions:
@@ -54,4 +56,29 @@ spec:
 
   resources:
     {{- toYaml .Values.keycloak.resources | nindent 4 }}
+
+  scheduling:
+    {{- with .Values.keycloak.nodeSelector }}
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                {{- range $key, $value := . }}
+                - key: {{ $key }}
+                  operator: In
+                  values:
+                    - {{ $value | quote }}
+                {{- end }}
+                {{- if $.Values.topologyZone }}
+                - key: topology.kubernetes.io/zone
+                  operator: In
+                  values:
+                    - {{ $.Values.topologyZone | quote }}
+                {{- end }}
+    {{- end }}
+    {{- with .Values.keycloak.tolerations }}
+    tolerations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
 {{- end }}

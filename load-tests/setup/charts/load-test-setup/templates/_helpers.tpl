@@ -45,7 +45,7 @@ name.
   {{/* Always fail this check in this case */}}
   {{- required "If the load test client OIDC auth server is not specified, Keycloak must be enabled!" nil -}}
   {{- end -}}
-http://{{ .Release.Namespace }}.{{ .Values.keycloak.namespace }}.svc.cluster.local:18080/auth/realms/camunda-platform/protocol/openid-connect/token
+http://{{ .Release.Namespace }}.{{ .Values.keycloak.namespace }}.svc.cluster.local:{{ .Values.keycloak.http.port }}/auth/realms/camunda-platform/protocol/openid-connect/token
 {{- end -}}
 {{- end -}}
 

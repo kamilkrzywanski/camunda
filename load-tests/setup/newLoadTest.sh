@@ -246,7 +246,6 @@ loadTest:
       # are overridden here.
       clientId: zeebe
       zeebeRestAddress: http://zeebe-gateway:8080
-      authServer: http://keycloak:80/auth/realms/camunda-platform/protocol/openid-connect/token
       zeebeGrpcAddress: http://zeebe-gateway:26500
       authorizationAudience: zeebe-api
       secret:
