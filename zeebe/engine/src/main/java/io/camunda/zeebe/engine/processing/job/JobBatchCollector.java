@@ -98,6 +98,7 @@ final class JobBatchCollector {
     final Collection<DirectBuffer> requestedVariables = collectVariableNames(value);
     final var maxActivatedCount = value.getMaxJobsToActivate();
     final var activatedCount = new MutableInteger(0);
+    final var skippedUncachedSecretJobs = new MutableInteger(0);
     final var unwritableJob = new MutableReference<TooLargeJob>();
     final Map<JobKind, Integer> jobCountPerJobKind = new EnumMap<>(JobKind.class);
     final var deadline = clock.millis() + value.getTimeout();
@@ -124,9 +125,16 @@ final class JobBatchCollector {
           final var secretCheck = jobSecretInjector.checkSecrets(jobRecord);
           if (!secretCheck.activatable()) {
             // Skip jobs with an uncached secret reference without consuming a batch slot, so the
-            // jobs behind them can still be activated; the skipped jobs stay activatable
+            // jobs behind them can still be activated; the skipped jobs stay activatable. The
+            // skips are bounded so one activation command cannot scan arbitrarily many jobs. The
+            // batch is deliberately not marked truncated when the bound stops the collection: the
+            // skipped jobs stay activatable, so an immediate repoll would only skip them again
+            // without progress (https://github.com/camunda/camunda/issues/57846 will mark them as
+            // waiting for resolution, which allows truncating here).
             jobMetrics.countJobEvent(JobAction.SKIPPED, jobRecord.getJobKind(), value.getType());
-            return true;
+            skippedUncachedSecretJobs.increment();
+            return skippedUncachedSecretJobs.value
+                < EngineConfiguration.MAX_UNCACHED_SECRET_JOBS_SKIPPED_PER_ACTIVATION;
           }
 
           // fill in the job record properties first in order to accurately estimate its size before

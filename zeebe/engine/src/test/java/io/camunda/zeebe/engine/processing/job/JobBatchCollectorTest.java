@@ -173,6 +173,30 @@ final class JobBatchCollectorTest {
   }
 
   @Test
+  void shouldStopCollectingWhenSkippedUncachedSecretJobsReachLimit() {
+    // given - a plain job, one more uncached-secret job than the skip limit, and a plain job
+    // behind them
+    final TypedRecord<JobBatchRecord> record = createRecord();
+    final long scopeKey = state.getKeyGenerator().nextKey();
+    final var firstPlainJob = createJob(scopeKey);
+    for (int i = 0; i <= EngineConfiguration.MAX_UNCACHED_SECRET_JOBS_SKIPPED_PER_ACTIVATION; i++) {
+      createJobWithSecretReference(scopeKey, "uncached-" + i);
+    }
+    createJob(scopeKey);
+
+    // when
+    final Either<TooLargeJob, Map<JobKind, Integer>> result =
+        collector.collectJobs(record, List.of(TenantOwned.DEFAULT_TENANT_IDENTIFIER));
+
+    // then - collection stops at the skip limit, keeping the jobs collected before it; the plain
+    // job behind the skipped ones is not reached
+    EitherAssert.assertThat(result).right().isEqualTo(Map.of(JobKind.BPMN_ELEMENT, 1));
+    JobBatchRecordValueAssert.assertThat(record.getValue())
+        .hasOnlyJobKeys(firstPlainJob.key)
+        .isNotTruncated();
+  }
+
+  @Test
   void shouldCollectJobWithCachedSecretAndPrepareItsInjection() {
     // given
     secretCache.put("token", "resolved");
