@@ -29,6 +29,74 @@ final class JobSecretInjectorTest {
 
   private static final String STORE_ID = "";
 
+  private static JobSecretInjector injector(final Map<String, String> cachedSecrets) {
+    return new JobSecretInjector(
+        references -> {
+          final Map<SecretReference, String> values = new HashMap<>();
+          for (final SecretReference reference : references) {
+            final String value = cachedSecrets.get(reference.secretReference());
+            if (value != null) {
+              values.put(reference, value);
+            }
+          }
+          return values;
+        });
+  }
+
+  private static JobBatchRecord batchWith(final JobRecord... jobs) {
+    final var batch = new JobBatchRecord().setType("task-type");
+    long key = 100;
+    for (final JobRecord job : jobs) {
+      batch.jobKeys().add().setValue(key++);
+      batch.jobs().add().copyFrom(job);
+    }
+    return batch;
+  }
+
+  private static JobBatchRecord copyOf(final JobBatchRecord batch) {
+    final var copy = new JobBatchRecord();
+    copy.copyFrom(batch);
+    return copy;
+  }
+
+  private static JobRecord job(final Map<String, ?> variables, final SecretRef... refs) {
+    final var job =
+        new JobRecord()
+            .setVariables(BufferUtil.wrapArray(MsgPackConverter.convertToMsgPack(variables)));
+    for (final SecretRef ref : refs) {
+      job.addSecretReference(ref.storeId(), ref.name(), ref.path());
+    }
+    return job;
+  }
+
+  private static SecretRef ref(final String name, final String path) {
+    return new SecretRef(STORE_ID, name, path);
+  }
+
+  private static Map<String, Object> variablesOf(final JobBatchRecord batch, final int index) {
+    final var variables = variablesOfAllJobs(batch);
+    if (index >= variables.size()) {
+      throw new IllegalArgumentException("no job at index " + index);
+    }
+    return variables.get(index);
+  }
+
+  private static List<Map<String, Object>> variablesOfAllJobs(final JobBatchRecord batch) {
+    final List<Map<String, Object>> variables = new ArrayList<>();
+    for (final JobRecord job : batch.jobs()) {
+      variables.add(job.getVariables());
+    }
+    return variables;
+  }
+
+  private static List<Long> jobKeysOf(final JobBatchRecord batch) {
+    final List<Long> keys = new ArrayList<>();
+    for (final LongValue key : batch.jobKeys()) {
+      keys.add(key.getValue());
+    }
+    return keys;
+  }
+
   @Nested
   final class RemoveJobsWithUncachedSecrets {
 
@@ -527,74 +595,6 @@ final class JobSecretInjectorTest {
       final var preparation = injector.removeJobsWithUncachedSecrets(activated);
       return injector.injectSecretValues(response, activated, preparation);
     }
-  }
-
-  private static JobSecretInjector injector(final Map<String, String> cachedSecrets) {
-    return new JobSecretInjector(
-        references -> {
-          final Map<SecretReference, String> values = new HashMap<>();
-          for (final SecretReference reference : references) {
-            final String value = cachedSecrets.get(reference.secretReference());
-            if (value != null) {
-              values.put(reference, value);
-            }
-          }
-          return values;
-        });
-  }
-
-  private static JobBatchRecord batchWith(final JobRecord... jobs) {
-    final var batch = new JobBatchRecord().setType("task-type");
-    long key = 100;
-    for (final JobRecord job : jobs) {
-      batch.jobKeys().add().setValue(key++);
-      batch.jobs().add().copyFrom(job);
-    }
-    return batch;
-  }
-
-  private static JobBatchRecord copyOf(final JobBatchRecord batch) {
-    final var copy = new JobBatchRecord();
-    copy.copyFrom(batch);
-    return copy;
-  }
-
-  private static JobRecord job(final Map<String, ?> variables, final SecretRef... refs) {
-    final var job =
-        new JobRecord()
-            .setVariables(BufferUtil.wrapArray(MsgPackConverter.convertToMsgPack(variables)));
-    for (final SecretRef ref : refs) {
-      job.addSecretReference(ref.storeId(), ref.name(), ref.path());
-    }
-    return job;
-  }
-
-  private static SecretRef ref(final String name, final String path) {
-    return new SecretRef(STORE_ID, name, path);
-  }
-
-  private static Map<String, Object> variablesOf(final JobBatchRecord batch, final int index) {
-    final var variables = variablesOfAllJobs(batch);
-    if (index >= variables.size()) {
-      throw new IllegalArgumentException("no job at index " + index);
-    }
-    return variables.get(index);
-  }
-
-  private static List<Map<String, Object>> variablesOfAllJobs(final JobBatchRecord batch) {
-    final List<Map<String, Object>> variables = new ArrayList<>();
-    for (final JobRecord job : batch.jobs()) {
-      variables.add(job.getVariables());
-    }
-    return variables;
-  }
-
-  private static List<Long> jobKeysOf(final JobBatchRecord batch) {
-    final List<Long> keys = new ArrayList<>();
-    for (final LongValue key : batch.jobKeys()) {
-      keys.add(key.getValue());
-    }
-    return keys;
   }
 
   private record SecretRef(String storeId, String name, String path) {}

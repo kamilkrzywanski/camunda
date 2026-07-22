@@ -46,9 +46,6 @@ public final class JobSecretActivationInjectionTest {
   private static final String TASK_ID = "task";
   private static final String JOB_TYPE = "task-type";
 
-  private final Map<String, String> cachedSecrets = new HashMap<>();
-  private boolean failResolution;
-
   @Rule
   public final EngineRule engine =
       EngineRule.singlePartition().withSecretResolver(this::resolveFromCachedSecrets);
@@ -57,6 +54,8 @@ public final class JobSecretActivationInjectionTest {
   public final RecordingExporterTestWatcher recordingExporterTestWatcher =
       new RecordingExporterTestWatcher();
 
+  private final Map<String, String> cachedSecrets = new HashMap<>();
+  private boolean failResolution;
   private CommandResponseWriter mockResponseWriter;
   private volatile JobBatchRecord activationResponse;
 
