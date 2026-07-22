@@ -82,7 +82,6 @@ import java.io.UncheckedIOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
-import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -110,10 +109,9 @@ public final class ZeebePartitionFactory {
   private final ClusterConfigurationService clusterConfigurationService;
   private final RocksDbResources rocksDbResources;
 
-  // Shared across this tenant's partitions: the caches are read on job activation to inject
-  // resolved secrets and populated by the background secret-resolution flow. Empty until the
-  // configured per-tenant registry is threaded through, so no secrets resolve yet.
-  private final SecretStoreRegistry secretStoreRegistry = new SecretStoreRegistry(Map.of());
+  // The tenant's secret store registry, shared across its partitions: the caches are read on job
+  // activation to inject resolved secrets and populated by the background secret-resolution flow.
+  private final SecretStoreRegistry secretStoreRegistry;
 
   public ZeebePartitionFactory(
       final ActorSchedulingService actorSchedulingService,
@@ -133,7 +131,8 @@ public final class ZeebePartitionFactory {
       final SearchClientsProxy searchClientsProxy,
       final BrokerRequestAuthorizationConverter brokerRequestAuthorizationConverter,
       final ClusterConfigurationService clusterConfigurationService,
-      final RocksDbResources rocksDbResources) {
+      final RocksDbResources rocksDbResources,
+      final SecretStoreRegistry secretStoreRegistry) {
     this.actorSchedulingService = actorSchedulingService;
     this.brokerCfg = brokerCfg;
     this.localBroker = localBroker;
@@ -152,6 +151,7 @@ public final class ZeebePartitionFactory {
     this.brokerRequestAuthorizationConverter = brokerRequestAuthorizationConverter;
     this.clusterConfigurationService = clusterConfigurationService;
     this.rocksDbResources = rocksDbResources;
+    this.secretStoreRegistry = secretStoreRegistry;
   }
 
   public ZeebePartition constructPartition(
