@@ -83,7 +83,12 @@ public final class JobBatchActivateProcessor implements TypedRecordProcessor<Job
     jobSecretInjector = new JobSecretInjector(secretStoreRegistry);
     jobBatchCollector =
         new JobBatchCollector(
-            state, stateWriter::canWriteEventOfLength, cslCheck, clock, jobMetrics);
+            state,
+            stateWriter::canWriteEventOfLength,
+            cslCheck,
+            clock,
+            jobMetrics,
+            jobSecretInjector);
 
     this.keyGenerator = keyGenerator;
     this.jobMetrics = jobMetrics;
@@ -197,11 +202,11 @@ public final class JobBatchActivateProcessor implements TypedRecordProcessor<Job
       final TypedRecord<JobBatchRecord> record,
       final JobBatchRecord value,
       final long jobBatchKey) {
-    // jobs whose secret references are not all cached must not be activated: remove them from the
-    // batch before the ACTIVATED event is appended, so they stay activatable
-    final var preparation = jobSecretInjector.removeJobsWithUncachedSecrets(value);
-    // building the response can drop further jobs from the batch (those whose injected secret
-    // values would exceed the max message size), so it must also happen before the event
+    // the collector skipped the jobs whose secret references are not all cached; take the cached
+    // values and the appended jobs with secret references it prepared for the value injection
+    final var preparation = jobSecretInjector.finishPreparation();
+    // building the response can drop jobs from the batch (those whose injected secret values
+    // would exceed the max message size), so it must happen before the ACTIVATED event
     final var response = responseValueFor(record, value, preparation);
     // append (and apply to state) the ACTIVATED event with the unresolved placeholders
     stateWriter.appendFollowUpEvent(jobBatchKey, JobBatchIntent.ACTIVATED, value);

@@ -170,6 +170,37 @@ public final class JobSecretActivationInjectionTest {
   }
 
   @Test
+  public void shouldActivateJobBehindJobWithUncachedSecret() {
+    // given - a job with an uncached secret is created before a job without secret references,
+    // both of the same type
+    deploy(t -> t.zeebeInputExpression("\"Bearer \" + camunda.secrets.token", "authorization"));
+    createInstanceAndAwaitJob();
+    deploy("plain-process", t -> t.zeebeInputExpression("\"plain-value\"", "authorization"));
+    createInstanceAndAwaitJob("plain-process");
+
+    // when - activating at most one job
+    final Record<JobBatchRecordValue> activated =
+        engine
+            .jobs()
+            .withType(JOB_TYPE)
+            .withMaxJobsToActivate(1)
+            .withRequestStreamId(1)
+            .withRequestId(1L)
+            .activate();
+
+    // then - the uncached job does not consume the batch slot; the job behind it is handed out
+    assertThat(activated.getValue().getJobs()).hasSize(1);
+    assertThat(activated.getValue().getJobs().get(0).getVariables())
+        .containsEntry("authorization", "plain-value");
+    Awaitility.await("until the activation response is written")
+        .atMost(Duration.ofSeconds(5))
+        .untilAsserted(() -> assertThat(activationResponse).isNotNull());
+    assertThat(activationResponse.getJobs()).hasSize(1);
+    assertThat(activationResponse.getJobs().get(0).getVariables())
+        .containsEntry("authorization", "plain-value");
+  }
+
+  @Test
   public void shouldNotChangeVariablesForJobWithoutSecrets() {
     // given
     cachedSecrets.put("token", "resolved-secret");
@@ -273,7 +304,11 @@ public final class JobSecretActivationInjectionTest {
   }
 
   private long createInstanceAndAwaitJob() {
-    final long processInstanceKey = engine.processInstance().ofBpmnProcessId(PROCESS_ID).create();
+    return createInstanceAndAwaitJob(PROCESS_ID);
+  }
+
+  private long createInstanceAndAwaitJob(final String processId) {
+    final long processInstanceKey = engine.processInstance().ofBpmnProcessId(processId).create();
     RecordingExporter.jobRecords(JobIntent.CREATED)
         .withProcessInstanceKey(processInstanceKey)
         .getFirst();
@@ -281,8 +316,12 @@ public final class JobSecretActivationInjectionTest {
   }
 
   private void deploy(final Consumer<ServiceTaskBuilder> modifier) {
+    deploy(PROCESS_ID, modifier);
+  }
+
+  private void deploy(final String processId, final Consumer<ServiceTaskBuilder> modifier) {
     final BpmnModelInstance process =
-        Bpmn.createExecutableProcess(PROCESS_ID)
+        Bpmn.createExecutableProcess(processId)
             .startEvent()
             .serviceTask(
                 TASK_ID,

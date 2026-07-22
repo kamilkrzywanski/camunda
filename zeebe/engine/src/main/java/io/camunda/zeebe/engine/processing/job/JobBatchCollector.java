@@ -51,25 +51,30 @@ final class JobBatchCollector {
   private final Predicate<Integer> canWriteEventOfLength;
   private final InstantSource clock;
   private final JobProcessingMetrics jobMetrics;
+  private final JobSecretInjector jobSecretInjector;
 
   /**
    * @param canWriteEventOfLength a predicate which should return whether the resulting {@link
    *     TypedRecord} containing the {@link JobBatchRecord} will be writable or not. The predicate
    *     takes in the size of the record, and should return true if it can write such a record, and
    *     false otherwise
+   * @param jobSecretInjector checks the secret references of every job against the secret caches;
+   *     jobs with an uncached reference are skipped without consuming a batch slot
    */
   JobBatchCollector(
       final ProcessingState state,
       final Predicate<Integer> canWriteEventOfLength,
       final CslAuthorizationCheck cslCheck,
       final InstantSource clock,
-      final JobProcessingMetrics jobMetrics) {
+      final JobProcessingMetrics jobMetrics,
+      final JobSecretInjector jobSecretInjector) {
     jobState = state.getJobState();
     this.canWriteEventOfLength = canWriteEventOfLength;
     jobVariablesCollector = new JobVariablesCollector(state);
     this.cslCheck = cslCheck;
     this.clock = clock;
     this.jobMetrics = jobMetrics;
+    this.jobSecretInjector = jobSecretInjector;
   }
 
   /**
@@ -100,6 +105,7 @@ final class JobBatchCollector {
     // compute per-job authorization predicate once before the loop
     final Predicate<JobRecord> isAuthorizedForJob = buildAuthzPredicate(record);
 
+    jobSecretInjector.reset();
     jobState.forEachActivatableJobs(
         value.getTypeBuffer(),
         tenantIds,
@@ -111,6 +117,14 @@ final class JobBatchCollector {
 
           if (!value.isWithLease() && !jobRecord.getLeaseToken().isEmpty()) {
             // Skip leased jobs so an unleased activation cannot break the lease's exclusivity
+            jobMetrics.countJobEvent(JobAction.SKIPPED, jobRecord.getJobKind(), value.getType());
+            return true;
+          }
+
+          final var secretCheck = jobSecretInjector.checkSecrets(jobRecord);
+          if (!secretCheck.activatable()) {
+            // Skip jobs with an uncached secret reference without consuming a batch slot, so the
+            // jobs behind them can still be activated; the skipped jobs stay activatable
             jobMetrics.countJobEvent(JobAction.SKIPPED, jobRecord.getJobKind(), value.getType());
             return true;
           }
@@ -133,7 +147,8 @@ final class JobBatchCollector {
                   + EngineConfiguration.BATCH_SIZE_CALCULATION_BUFFER;
           if (activatedCount.value <= maxActivatedCount
               && canWriteEventOfLength.test(expectedEventLength)) {
-            appendJobToBatch(jobIterator, jobKeyIterator, key, jobRecord);
+            final var appendedJob = appendJobToBatch(jobIterator, jobKeyIterator, key, jobRecord);
+            jobSecretInjector.registerForInjection(secretCheck, activatedCount.value, appendedJob);
             activatedCount.increment();
 
             // track the count of activated jobs by their JobKind
@@ -183,13 +198,15 @@ final class JobBatchCollector {
             .isRight();
   }
 
-  private void appendJobToBatch(
+  private JobRecord appendJobToBatch(
       final ValueArray<JobRecord> jobIterator,
       final ValueArray<LongValue> jobKeyIterator,
       final long key,
       final JobRecord jobRecord) {
     jobKeyIterator.add().setValue(key);
-    jobIterator.add().copyFrom(jobRecord);
+    final JobRecord appendedJob = jobIterator.add();
+    appendedJob.copyFrom(jobRecord);
+    return appendedJob;
   }
 
   /**

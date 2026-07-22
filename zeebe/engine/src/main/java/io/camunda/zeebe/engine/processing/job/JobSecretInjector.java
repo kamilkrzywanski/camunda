@@ -23,11 +23,9 @@ import io.camunda.zeebe.protocol.impl.record.value.job.JobSecretReference;
 import io.camunda.zeebe.util.buffer.BufferUtil;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import org.agrona.DirectBuffer;
 import org.agrona.io.DirectBufferInputStream;
 import org.msgpack.jackson.dataformat.MessagePackFactory;
@@ -39,19 +37,21 @@ import org.slf4j.LoggerFactory;
  * ACTIVATED event is appended:
  *
  * <ol>
- *   <li>{@link #removeJobsWithUncachedSecrets} looks up the secret references of every job (stored
- *       on the {@link JobRecord} at creation) in the per-store secret caches of the {@link
- *       SecretStoreRegistry} and removes the jobs with an uncached reference from the batch, so
- *       they are not activated.
+ *   <li>During batch collection, {@link #checkSecrets} looks up the secret references of every job
+ *       (stored on the {@link JobRecord} at creation) in the per-store secret caches of the {@link
+ *       SecretStoreRegistry}. Jobs with an uncached reference are skipped by the collector without
+ *       consuming a batch slot, so jobs behind them can still be activated; jobs whose references
+ *       are all cached are appended and registered via {@link #registerForInjection}.
  *   <li>{@link #injectSecretValues} replaces the placeholder text {@code camunda.secrets.<name>} of
- *       the remaining jobs with the cached value on a response-only copy of the batch, at the JSON
+ *       the registered jobs with the cached value on a response-only copy of the batch, at the JSON
  *       pointer recorded for each reference. Jobs whose values would grow the response beyond the
  *       max message size are dropped from the activation instead.
  * </ol>
  *
- * <p>Both steps modify the given batches in place. The injected values must only ever reach the
- * record that is written to the activation response and nowhere else. That keeps the secret values
- * on the response only: state, records, and logs keep the placeholders.
+ * <p>The cached values are materialized once at check time and reused for the injection, so a value
+ * evicted from the cache in between cannot drop a job late. The injected values must only ever
+ * reach the record that is written to the activation response and nowhere else. That keeps the
+ * secret values on the response only: state, records, and logs keep the placeholders.
  *
  * <p>The replacement is textual: every occurrence of the placeholder in the addressed leaf is
  * replaced, including text that merely spells out the placeholder next to a real reference at the
@@ -72,45 +72,101 @@ public final class JobSecretInjector {
 
   private final Map<String, SecretCache> caches;
 
+  // accumulated per activation command while the collector checks and appends jobs, handed out
+  // (and reset) by finishPreparation
+  private final Map<SecretReference, String> values = new HashMap<>();
+  private final List<PendingJob> pendingJobs = new ArrayList<>();
+  private boolean lookupFailed;
+
   public JobSecretInjector(final SecretStoreRegistry secretStoreRegistry) {
     caches = secretStoreRegistry.getCaches();
   }
 
-  /**
-   * Removes every job with a secret reference that has no cached value from the batch (together
-   * with its job key), so those jobs are not activated. Must run before the ACTIVATED event is
-   * appended; the removed jobs stay activatable. If the cache lookup fails, every job with secret
-   * references is removed. Returns the preparation for {@link #injectSecretValues}: the cached
-   * values and the surviving jobs with secret references, materialized once.
-   */
-  public Preparation removeJobsWithUncachedSecrets(final JobBatchRecord batch) {
-    final List<PendingJob> candidates = collectPendingJobs(batch);
-    if (candidates.isEmpty()) {
-      return Preparation.NONE;
-    }
-    final Map<SecretReference, String> values = resolve(referencesOf(candidates));
+  /** Discards any state accumulated for a previous activation command. */
+  public void reset() {
+    values.clear();
+    pendingJobs.clear();
+    lookupFailed = false;
+  }
 
-    // TODO(https://github.com/camunda/camunda/issues/57846): instead of leaving the removed jobs
-    //  activatable (which can make a long poll collect them again right away), append an event
-    //  that marks them as waiting for secret resolution (e.g. WAITING_FOR_SECRET_RESOLUTION) and
-    //  request the background resolution of their secrets.
-    final List<PendingJob> pendingJobs = new ArrayList<>(candidates.size());
-    final List<Integer> uncachedJobs = new ArrayList<>();
-    for (final PendingJob candidate : candidates) {
-      if (hasUncachedReference(candidate, values)) {
-        uncachedJobs.add(candidate.index());
-      } else {
-        // only the removed jobs before a surviving job shift its index to the left
-        pendingJobs.add(candidate.atIndex(candidate.index() - uncachedJobs.size()));
+  /**
+   * Checks whether every secret reference of the job (stored on the {@link JobRecord} at creation)
+   * has a cached value, materializing the values and the job's secrets once. Jobs without secret
+   * references are always activatable. Once a cache lookup fails, every later job with a reference
+   * that was not resolved before the failure is skipped, so no half-resolved job is handed out.
+   *
+   * <p>TODO(https://github.com/camunda/camunda/issues/57846): the skipped jobs stay activatable,
+   * which can make a long poll collect them again right away. Instead, mark them as waiting for
+   * secret resolution and request the background resolution of their secrets.
+   */
+  public SecretCheck checkSecrets(final JobRecord job) {
+    if (!job.hasSecretReferences()) {
+      return SecretCheck.NO_SECRETS;
+    }
+    final List<Secret> secrets = secretsOf(job);
+    for (final Secret secret : secrets) {
+      if (!resolveIntoValues(secret.reference())) {
+        return SecretCheck.SKIP;
       }
     }
-    // remove in descending index order so the remaining indices stay valid
-    for (int i = uncachedJobs.size() - 1; i >= 0; i--) {
-      final int uncachedIndex = uncachedJobs.get(i);
-      batch.jobs().remove(uncachedIndex);
-      batch.jobKeys().remove(uncachedIndex);
+    return new SecretCheck(true, secrets);
+  }
+
+  /**
+   * Registers a job appended to the batch for the value injection of {@link #injectSecretValues},
+   * with its position in the batch and the appended {@link JobRecord} element (whose variables the
+   * injection reads). A check without secrets registers nothing.
+   */
+  public void registerForInjection(
+      final SecretCheck check, final int batchIndex, final JobRecord appendedJob) {
+    if (!check.secrets().isEmpty()) {
+      pendingJobs.add(new PendingJob(batchIndex, appendedJob, check.secrets()));
     }
-    return new Preparation(values, pendingJobs);
+  }
+
+  /**
+   * Returns the preparation for {@link #injectSecretValues} accumulated since the last reset: the
+   * cached values materialized by {@link #checkSecrets} and the jobs registered via {@link
+   * #registerForInjection}. Resets this injector for the next activation command.
+   */
+  public Preparation finishPreparation() {
+    if (pendingJobs.isEmpty()) {
+      reset();
+      return Preparation.NONE;
+    }
+    final var preparation = new Preparation(Map.copyOf(values), List.copyOf(pendingJobs));
+    reset();
+    return preparation;
+  }
+
+  /**
+   * Resolves the reference into the materialized values, or returns {@code false} when it has no
+   * cached value. A reference resolved before is not looked up again. If a lookup fails, no later
+   * reference resolves for this activation command, and the failure is logged once.
+   */
+  private boolean resolveIntoValues(final SecretReference reference) {
+    if (values.containsKey(reference)) {
+      return true;
+    }
+    if (lookupFailed) {
+      return false;
+    }
+    try {
+      final SecretCache cache = cacheOf(reference.storeId());
+      if (cache == null) {
+        return false;
+      }
+      final Optional<String> value = cache.get(reference.name());
+      value.ifPresent(cachedValue -> values.put(reference, cachedValue));
+      return value.isPresent();
+    } catch (final RuntimeException e) {
+      lookupFailed = true;
+      LOGGER.warn(
+          "Failed to look up the secret references of a job activation batch; "
+              + "the affected jobs are not activated",
+          e);
+      return false;
+    }
   }
 
   /**
@@ -150,31 +206,6 @@ public final class JobSecretInjector {
   }
 
   /**
-   * Returns the cached value for every given reference that is currently cached; references without
-   * a cached value are absent from the returned map. If a cache lookup fails, no reference
-   * resolves, so every job with secret references is removed from the batch.
-   */
-  private Map<SecretReference, String> resolve(final Set<SecretReference> references) {
-    try {
-      final Map<SecretReference, String> values = HashMap.newHashMap(references.size());
-      for (final SecretReference reference : references) {
-        final SecretCache cache = cacheOf(reference.storeId());
-        if (cache != null) {
-          cache.get(reference.name()).ifPresent(value -> values.put(reference, value));
-        }
-      }
-      return values;
-    } catch (final RuntimeException e) {
-      LOGGER.warn(
-          "Failed to look up the {} secret reference(s) of a job activation batch; "
-              + "the affected jobs are not activated",
-          references.size(),
-          e);
-      return Map.of();
-    }
-  }
-
-  /**
    * Returns the cache of the store holding the referenced secret, or {@code null} when no store
    * matches. The {@code camunda.secrets.<name>} syntax carries no store dimension yet, so an empty
    * store ID addresses the sole configured store; with several stores an empty store ID is
@@ -185,16 +216,6 @@ public final class JobSecretInjector {
       return caches.get(storeId);
     }
     return caches.size() == 1 ? caches.values().iterator().next() : null;
-  }
-
-  private static boolean hasUncachedReference(
-      final PendingJob pendingJob, final Map<SecretReference, String> values) {
-    for (final Secret secret : pendingJob.secrets()) {
-      if (!values.containsKey(secret.reference())) {
-        return true;
-      }
-    }
-    return false;
   }
 
   /**
@@ -285,29 +306,6 @@ public final class JobSecretInjector {
     return true;
   }
 
-  /** Collects the jobs with secret references, materializing each job's secrets exactly once. */
-  private static List<PendingJob> collectPendingJobs(final JobBatchRecord batch) {
-    final List<PendingJob> pendingJobs = new ArrayList<>();
-    int index = 0;
-    for (final JobRecord job : batch.jobs()) {
-      if (job.hasSecretReferences()) {
-        pendingJobs.add(new PendingJob(index, job, secretsOf(job)));
-      }
-      index++;
-    }
-    return pendingJobs;
-  }
-
-  private static Set<SecretReference> referencesOf(final List<PendingJob> pendingJobs) {
-    final Set<SecretReference> references = new LinkedHashSet<>();
-    for (final PendingJob pendingJob : pendingJobs) {
-      for (final Secret secret : pendingJob.secrets()) {
-        references.add(secret.reference());
-      }
-    }
-    return references;
-  }
-
   /**
    * Materializes the job's secret references, longest placeholder first so a reference name that is
    * a prefix of another (e.g. {@code token} vs {@code token2}) cannot corrupt the longer
@@ -328,23 +326,28 @@ public final class JobSecretInjector {
     return secrets;
   }
 
-  private record Secret(SecretReference reference, String path, String placeholder) {}
+  record Secret(SecretReference reference, String path, String placeholder) {}
+
+  /**
+   * The result of {@link #checkSecrets} for one job: whether the job may be activated, and its
+   * secrets, materialized once (empty for a job without secret references).
+   */
+  public record SecretCheck(boolean activatable, List<Secret> secrets) {
+    static final SecretCheck NO_SECRETS = new SecretCheck(true, List.of());
+    static final SecretCheck SKIP = new SecretCheck(false, List.of());
+  }
 
   /**
    * The preparation of an activation batch for {@link #injectSecretValues}: the cached secret
-   * values and the surviving jobs with secret references, each with its secrets materialized once
-   * by {@link #removeJobsWithUncachedSecrets}.
+   * values materialized by {@link #checkSecrets} and the appended jobs with secret references
+   * registered via {@link #registerForInjection}.
    */
   public record Preparation(Map<SecretReference, String> values, List<PendingJob> pendingJobs) {
     static final Preparation NONE = new Preparation(Map.of(), List.of());
   }
 
   /** A job with secret references: its index in the batch, the job, and its secrets. */
-  record PendingJob(int index, JobRecord job, List<Secret> secrets) {
-    private PendingJob atIndex(final int index) {
-      return new PendingJob(index, job, secrets);
-    }
-  }
+  record PendingJob(int index, JobRecord job, List<Secret> secrets) {}
 
   /**
    * A job dropped from the batch whose secret values can never fit: injecting them would grow the

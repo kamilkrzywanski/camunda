@@ -16,6 +16,7 @@ import io.camunda.secretstore.SecretStoreRegistry;
 import io.camunda.zeebe.engine.EngineConfiguration;
 import io.camunda.zeebe.engine.processing.deployment.model.element.SecretReference;
 import io.camunda.zeebe.engine.processing.job.JobSecretInjector.OversizedJob;
+import io.camunda.zeebe.engine.processing.job.JobSecretInjector.Preparation;
 import io.camunda.zeebe.msgpack.value.LongValue;
 import io.camunda.zeebe.protocol.impl.encoding.MsgPackConverter;
 import io.camunda.zeebe.protocol.impl.record.value.job.JobBatchRecord;
@@ -25,6 +26,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
@@ -51,6 +53,28 @@ final class JobSecretInjectorTest {
       batch.jobs().add().copyFrom(job);
     }
     return batch;
+  }
+
+  /**
+   * Mirrors the collector: checks each job, appends only the activatable ones to the batch (keys
+   * starting at 100, in the given order), and registers the appended jobs with secret references
+   * for the injection.
+   */
+  private static Collected collect(final JobSecretInjector injector, final JobRecord... jobs) {
+    final var batch = new JobBatchRecord().setType("task-type");
+    injector.reset();
+    long key = 100;
+    for (final JobRecord job : jobs) {
+      final var check = injector.checkSecrets(job);
+      if (check.activatable()) {
+        batch.jobKeys().add().setValue(key);
+        final JobRecord appendedJob = batch.jobs().add();
+        appendedJob.copyFrom(job);
+        injector.registerForInjection(check, batch.jobs().size() - 1, appendedJob);
+      }
+      key++;
+    }
+    return new Collected(batch, injector.finishPreparation());
   }
 
   private static JobBatchRecord copyOf(final JobBatchRecord batch) {
@@ -98,89 +122,90 @@ final class JobSecretInjectorTest {
   }
 
   @Nested
-  final class RemoveJobsWithUncachedSecrets {
+  final class CheckSecrets {
 
     @Test
-    void shouldRemoveJobWhoseSecretIsNotCached() {
+    void shouldSkipJobWhoseSecretIsNotCached() {
       // given - a cached job, an uncached job, and a job without references
       final var injector = injector(Map.of("token", "resolved"));
-      final var batch =
-          batchWith(
+
+      // when
+      final var collected =
+          collect(
+              injector,
               job(Map.of("auth", "camunda.secrets.token"), ref("token", "/auth")),
               job(Map.of("auth", "camunda.secrets.other"), ref("other", "/auth")),
               job(Map.of("foo", "bar")));
 
-      // when
-      final var preparation = injector.removeJobsWithUncachedSecrets(batch);
-
-      // then - the uncached job and its key are removed, the others stay aligned
-      assertThat(variablesOfAllJobs(batch))
+      // then - the uncached job is not collected, the others keep their keys aligned
+      assertThat(variablesOfAllJobs(collected.batch()))
           .containsExactly(Map.of("auth", "camunda.secrets.token"), Map.of("foo", "bar"));
-      assertThat(jobKeysOf(batch)).containsExactly(100L, 102L);
-      assertThat(preparation.values())
+      assertThat(jobKeysOf(collected.batch())).containsExactly(100L, 102L);
+      assertThat(collected.preparation().values())
           .containsEntry(new SecretReference(STORE_ID, "token"), "resolved");
     }
 
     @Test
-    void shouldKeepAllJobsWhenAllSecretsAreCached() {
+    void shouldCollectAllJobsWhenAllSecretsAreCached() {
       // given
       final var injector = injector(Map.of("token", "t", "apiKey", "k"));
-      final var batch =
-          batchWith(
+
+      // when
+      final var collected =
+          collect(
+              injector,
               job(Map.of("auth", "camunda.secrets.token"), ref("token", "/auth")),
               job(Map.of("key", "camunda.secrets.apiKey"), ref("apiKey", "/key")));
 
-      // when
-      final var preparation = injector.removeJobsWithUncachedSecrets(batch);
-
       // then
-      assertThat(jobKeysOf(batch)).containsExactly(100L, 101L);
-      assertThat(preparation.values())
+      assertThat(jobKeysOf(collected.batch())).containsExactly(100L, 101L);
+      assertThat(collected.preparation().values())
           .containsEntry(new SecretReference(STORE_ID, "token"), "t")
           .containsEntry(new SecretReference(STORE_ID, "apiKey"), "k");
     }
 
     @Test
-    void shouldRemoveJobWhenOnlySomeOfItsSecretsAreCached() {
+    void shouldSkipJobWhenOnlySomeOfItsSecretsAreCached() {
       // given - one of the job's two references has no cached value
       final var injector = injector(Map.of("token", "t"));
-      final var batch =
-          batchWith(
+
+      // when
+      final var collected =
+          collect(
+              injector,
               job(
                   Map.of("auth", "camunda.secrets.token", "key", "camunda.secrets.apiKey"),
                   ref("token", "/auth"),
                   ref("apiKey", "/key")));
 
-      // when
-      injector.removeJobsWithUncachedSecrets(batch);
-
       // then
-      assertThat(jobKeysOf(batch)).isEmpty();
-      assertThat(variablesOfAllJobs(batch)).isEmpty();
+      assertThat(jobKeysOf(collected.batch())).isEmpty();
+      assertThat(variablesOfAllJobs(collected.batch())).isEmpty();
+      assertThat(collected.preparation().pendingJobs()).isEmpty();
     }
 
     @Test
-    void shouldRemoveNonAdjacentJobsAndKeepKeysAligned() {
-      // given - uncached jobs at index 0 and 2
+    void shouldSkipNonAdjacentJobsAndKeepKeysAligned() {
+      // given - uncached jobs at position 0 and 2
       final var injector = injector(Map.of("token", "t"));
-      final var batch =
-          batchWith(
+
+      // when
+      final var collected =
+          collect(
+              injector,
               job(Map.of("a", "camunda.secrets.other"), ref("other", "/a")),
               job(Map.of("b", "camunda.secrets.token"), ref("token", "/b")),
               job(Map.of("c", "camunda.secrets.another"), ref("another", "/c")),
               job(Map.of("d", "plain")));
 
-      // when
-      injector.removeJobsWithUncachedSecrets(batch);
-
       // then
-      assertThat(variablesOfAllJobs(batch))
+      assertThat(variablesOfAllJobs(collected.batch()))
           .containsExactly(Map.of("b", "camunda.secrets.token"), Map.of("d", "plain"));
-      assertThat(jobKeysOf(batch)).containsExactly(101L, 103L);
+      assertThat(jobKeysOf(collected.batch())).containsExactly(101L, 103L);
     }
 
     @Test
-    void shouldRemoveAllSecretJobsWhenCacheLookupThrows() {
+    void shouldSkipSecretJobsWhenCacheLookupThrows() {
       // given
       final SecretCache throwingCache =
           new SecretCache() {
@@ -192,35 +217,73 @@ final class JobSecretInjectorTest {
             @Override
             public void put(final String name, final String value) {}
           };
-      final var batch =
-          batchWith(
+      final var injector = new JobSecretInjector(registryWith(throwingCache));
+
+      // when
+      final var collected =
+          collect(
+              injector,
               job(Map.of("auth", "camunda.secrets.token"), ref("token", "/auth")),
               job(Map.of("foo", "bar")));
 
-      // when
-      final var preparation =
-          new JobSecretInjector(registryWith(throwingCache)).removeJobsWithUncachedSecrets(batch);
-
-      // then - only the job without references stays
-      assertThat(variablesOfAllJobs(batch)).containsExactly(Map.of("foo", "bar"));
-      assertThat(jobKeysOf(batch)).containsExactly(101L);
-      assertThat(preparation.values()).isEmpty();
-      assertThat(preparation.pendingJobs()).isEmpty();
+      // then - only the job without references is collected
+      assertThat(variablesOfAllJobs(collected.batch())).containsExactly(Map.of("foo", "bar"));
+      assertThat(jobKeysOf(collected.batch())).containsExactly(101L);
+      assertThat(collected.preparation().values()).isEmpty();
+      assertThat(collected.preparation().pendingJobs()).isEmpty();
     }
 
     @Test
-    void shouldRemoveSecretJobsWhenNoStoreIsConfigured() {
+    void shouldCollectJobWhoseReferencesWereResolvedBeforeLookupFailure() {
+      // given - the cache serves the first lookup and throws on every later one
+      final var lookups = new AtomicInteger();
+      final SecretCache failingAfterFirstLookup =
+          new SecretCache() {
+            @Override
+            public Optional<String> get(final String name) {
+              if (lookups.getAndIncrement() > 0) {
+                throw new IllegalStateException("cache is broken");
+              }
+              return Optional.of("resolved");
+            }
+
+            @Override
+            public void put(final String name, final String value) {}
+          };
+      final var injector = new JobSecretInjector(registryWith(failingAfterFirstLookup));
+
+      // when - the second job fails the lookup; the third job needs only the already resolved
+      // reference
+      final var collected =
+          collect(
+              injector,
+              job(Map.of("a", "camunda.secrets.token"), ref("token", "/a")),
+              job(Map.of("b", "camunda.secrets.other"), ref("other", "/b")),
+              job(Map.of("c", "camunda.secrets.token"), ref("token", "/c")));
+
+      // then - the jobs covered by the value resolved before the failure are collected
+      assertThat(variablesOfAllJobs(collected.batch()))
+          .containsExactly(
+              Map.of("a", "camunda.secrets.token"), Map.of("c", "camunda.secrets.token"));
+      assertThat(jobKeysOf(collected.batch())).containsExactly(100L, 102L);
+      assertThat(collected.preparation().values())
+          .containsEntry(new SecretReference(STORE_ID, "token"), "resolved");
+    }
+
+    @Test
+    void shouldSkipSecretJobsWhenNoStoreIsConfigured() {
       // given - an empty registry has no caches, so no reference resolves
-      final var batch =
-          batchWith(
+      final var injector = new JobSecretInjector(new SecretStoreRegistry(Map.of()));
+
+      // when
+      final var collected =
+          collect(
+              injector,
               job(Map.of("auth", "camunda.secrets.token"), ref("token", "/auth")),
               job(Map.of("foo", "bar")));
 
-      // when
-      new JobSecretInjector(new SecretStoreRegistry(Map.of())).removeJobsWithUncachedSecrets(batch);
-
       // then
-      assertThat(variablesOfAllJobs(batch)).containsExactly(Map.of("foo", "bar"));
+      assertThat(variablesOfAllJobs(collected.batch())).containsExactly(Map.of("foo", "bar"));
     }
 
     @Test
@@ -232,18 +295,19 @@ final class JobSecretInjectorTest {
           new SecretStoreRegistry(
               Map.of("store-a", new NoopSecretStore(), "store-b", new NoopSecretStore()),
               Map.of("store-a", new InMemorySecretCache(), "store-b", cache));
-      final var batch =
-          batchWith(
+      final var injector = new JobSecretInjector(registry);
+
+      // when
+      final var collected =
+          collect(
+              injector,
               job(
                   Map.of("auth", "camunda.secrets.token"),
                   new SecretRef("store-b", "token", "/auth")));
 
-      // when
-      final var preparation = new JobSecretInjector(registry).removeJobsWithUncachedSecrets(batch);
-
       // then
-      assertThat(jobKeysOf(batch)).containsExactly(100L);
-      assertThat(preparation.values())
+      assertThat(jobKeysOf(collected.batch())).containsExactly(100L);
+      assertThat(collected.preparation().values())
           .containsEntry(new SecretReference("store-b", "token"), "resolved");
     }
 
@@ -259,29 +323,28 @@ final class JobSecretInjectorTest {
           new SecretStoreRegistry(
               Map.of("store-a", new NoopSecretStore(), "store-b", new NoopSecretStore()),
               Map.of("store-a", cacheA, "store-b", cacheB));
-      final var batch =
-          batchWith(job(Map.of("auth", "camunda.secrets.token"), ref("token", "/auth")));
+      final var injector = new JobSecretInjector(registry);
 
       // when
-      new JobSecretInjector(registry).removeJobsWithUncachedSecrets(batch);
+      final var collected =
+          collect(injector, job(Map.of("auth", "camunda.secrets.token"), ref("token", "/auth")));
 
-      // then - the job is removed instead of guessing a store
-      assertThat(jobKeysOf(batch)).isEmpty();
+      // then - the job is skipped instead of guessing a store
+      assertThat(jobKeysOf(collected.batch())).isEmpty();
     }
 
     @Test
-    void shouldNotTouchBatchWithoutSecretReferences() {
+    void shouldNotRegisterJobsWithoutSecretReferences() {
       // given
       final var injector = injector(Map.of());
-      final var batch = batchWith(job(Map.of("foo", "bar")), job(Map.of("baz", "qux")));
 
       // when
-      final var preparation = injector.removeJobsWithUncachedSecrets(batch);
+      final var collected = collect(injector, job(Map.of("foo", "bar")), job(Map.of("baz", "qux")));
 
       // then
-      assertThat(jobKeysOf(batch)).containsExactly(100L, 101L);
-      assertThat(preparation.values()).isEmpty();
-      assertThat(preparation.pendingJobs()).isEmpty();
+      assertThat(jobKeysOf(collected.batch())).containsExactly(100L, 101L);
+      assertThat(collected.preparation().values()).isEmpty();
+      assertThat(collected.preparation().pendingJobs()).isEmpty();
     }
   }
 
@@ -437,8 +500,9 @@ final class JobSecretInjectorTest {
     }
 
     @Test
-    void shouldInjectOnlyFullyCachedJobsInMultiJobBatch() {
-      // given - a cached job, a job without references, and a job with an uncached reference
+    void shouldInjectOnlyRegisteredJobsInMultiJobBatch() {
+      // given - a cached job, a job without references, and a job that fails the check (which the
+      // collector would not have appended; if it still sits in a batch, it must stay untouched)
       final Map<String, Object> withSecret = Map.of("auth", "camunda.secrets.token");
       final Map<String, Object> withoutSecret = Map.of("foo", "bar");
       final Map<String, Object> uncached = Map.of("auth", "camunda.secrets.other");
@@ -448,16 +512,15 @@ final class JobSecretInjectorTest {
               job(withoutSecret),
               job(uncached, ref("other", "/auth")));
 
-      // when - mirroring the processor: remove the uncached jobs, then inject into a response copy
-      final var injector = injector(Map.of("token", "resolved"));
-      final var preparation = injector.removeJobsWithUncachedSecrets(activated);
+      // when
       final var response = copyOf(activated);
-      injector.injectSecretValues(response, activated, preparation);
+      inject(response, activated, Map.of("token", "resolved"));
 
-      // then - the uncached job is removed and only the first job gets its value injected
+      // then - only the fully cached job gets its value injected on the response
       assertThat(variablesOfAllJobs(response))
-          .containsExactly(Map.of("auth", "resolved"), withoutSecret);
-      assertThat(variablesOfAllJobs(activated)).containsExactly(withSecret, withoutSecret);
+          .containsExactly(Map.of("auth", "resolved"), withoutSecret, uncached);
+      assertThat(variablesOfAllJobs(activated))
+          .containsExactly(withSecret, withoutSecret, uncached);
     }
 
     @Test
@@ -637,17 +700,26 @@ final class JobSecretInjectorTest {
     }
 
     /**
-     * Mirrors the processor flow: prepare on the to-be-activated batch, inject into the response.
+     * Mirrors the processor flow: register the jobs of the to-be-activated batch like the
+     * collector, then inject the prepared values into the response.
      */
     private static Optional<OversizedJob> inject(
         final JobBatchRecord response,
         final JobBatchRecord activated,
         final Map<String, String> secrets) {
       final var injector = injector(secrets);
-      final var preparation = injector.removeJobsWithUncachedSecrets(activated);
-      return injector.injectSecretValues(response, activated, preparation);
+      injector.reset();
+      int index = 0;
+      for (final JobRecord job : activated.jobs()) {
+        injector.registerForInjection(injector.checkSecrets(job), index, job);
+        index++;
+      }
+      return injector.injectSecretValues(response, activated, injector.finishPreparation());
     }
   }
+
+  /** An activation batch assembled by {@link #collect} and the preparation for its injection. */
+  private record Collected(JobBatchRecord batch, Preparation preparation) {}
 
   private record SecretRef(String storeId, String name, String path) {}
 }
