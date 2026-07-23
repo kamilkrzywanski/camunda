@@ -197,23 +197,26 @@ final class JobBatchCollectorTest {
   }
 
   @Test
-  void shouldCollectJobWithCachedSecretAndPrepareItsInjection() {
+  void shouldCollectJobWithCachedSecretAndInjectItsValue() {
     // given
     secretCache.put("token", "resolved");
     final TypedRecord<JobBatchRecord> record = createRecord();
     final long scopeKey = state.getKeyGenerator().nextKey();
+    setVariables(scopeKey, Map.of("auth", "camunda.secrets.token"));
     final var cachedJob = createJobWithSecretReference(scopeKey, "token");
     final var plainJob = createJob(scopeKey);
 
     // when
     collector.collectJobs(record, List.of(TenantOwned.DEFAULT_TENANT_IDENTIFIER));
-    final var preparation = secretInjector.finishPreparation();
 
-    // then - both jobs are collected and the secret job is prepared for the value injection at
+    // then - both jobs are collected and the secret job's value is injected on a response copy at
     // its batch position
     JobBatchRecordValueAssert.assertThat(record.getValue()).hasJobKeys(cachedJob.key, plainJob.key);
-    assertThat(preparation.jobsWithCachedSecrets()).hasSize(1);
-    assertThat(preparation.jobsWithCachedSecrets().getFirst().index()).isZero();
+    assertThat(secretInjector.hasSecretsToInject()).isTrue();
+    final var response = new JobBatchRecord();
+    response.wrap(record.getValue());
+    secretInjector.injectSecretValues(response, record.getValue());
+    assertThat(response.jobs().iterator().next().getVariables()).containsEntry("auth", "resolved");
   }
 
   @Test

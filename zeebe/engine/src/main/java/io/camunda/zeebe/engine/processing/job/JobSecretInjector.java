@@ -72,8 +72,8 @@ public final class JobSecretInjector {
 
   private final Map<String, SecretCache> caches;
 
-  // accumulated per activation command while the collector checks and appends jobs, handed out
-  // (and reset) by finishPreparation
+  // accumulated per activation command while the collector checks and appends jobs, consumed
+  // (and reset) by injectSecretValues; the collector's reset() bounds a new command
   private final Map<SecretReference, String> values = new HashMap<>();
   private final List<JobWithCachedSecrets> jobsWithCachedSecrets = new ArrayList<>();
 
@@ -127,19 +127,9 @@ public final class JobSecretInjector {
     }
   }
 
-  /**
-   * Returns the preparation for {@link #injectSecretValues} accumulated since the last reset: the
-   * cached values materialized by {@link #checkSecrets} and the jobs registered via {@link
-   * #registerForInjection}. Resets this injector for the next activation command.
-   */
-  public Preparation finishPreparation() {
-    if (jobsWithCachedSecrets.isEmpty()) {
-      reset();
-      return Preparation.NONE;
-    }
-    final var preparation = new Preparation(Map.copyOf(values), List.copyOf(jobsWithCachedSecrets));
-    reset();
-    return preparation;
+  /** Returns whether any job registered since the last reset has cached secret values to inject. */
+  public boolean hasSecretsToInject() {
+    return !jobsWithCachedSecrets.isEmpty();
   }
 
   /**
@@ -161,9 +151,12 @@ public final class JobSecretInjector {
   }
 
   /**
-   * Injects the cached values into the secret placeholders of the prepared jobs, replacing the
-   * variables of the response batch in place. Errors are contained per job (the job keeps its
-   * placeholders) and only logged, so no secret-related data can end up in persisted records.
+   * Injects the cached values into the secret placeholders of the registered jobs, replacing the
+   * variables of the response batch in place. Consumes the values and jobs accumulated since the
+   * last reset (the engine processor is single-threaded, so the collection of a command always
+   * completes before its injection) and resets this injector for the next activation command.
+   * Errors are contained per job (the job keeps its placeholders) and only logged, so no
+   * secret-related data can end up in persisted records.
    *
    * <p>The collector sized the batch against the max message size with {@link
    * EngineConfiguration#BATCH_SIZE_CALCULATION_BUFFER} bytes of slack, which the injected values
@@ -174,26 +167,31 @@ public final class JobSecretInjector {
    * Returns the dropped job when its values can never fit, for an incident.
    */
   public Optional<OversizedJob> injectSecretValues(
-      final JobBatchRecord responseBatch,
-      final JobBatchRecord activatedBatch,
-      final Preparation preparation) {
-    int remainingGrowth = EngineConfiguration.BATCH_SIZE_CALCULATION_BUFFER;
-    for (final JobWithCachedSecrets jobWithSecrets : preparation.jobsWithCachedSecrets()) {
-      final byte[] injected = injectedVariablesOf(jobWithSecrets, preparation.values());
-      if (injected == null) {
-        continue;
+      final JobBatchRecord responseBatch, final JobBatchRecord activatedBatch) {
+    try {
+      int remainingGrowth = EngineConfiguration.BATCH_SIZE_CALCULATION_BUFFER;
+      for (final JobWithCachedSecrets jobWithSecrets : jobsWithCachedSecrets) {
+        final byte[] injected = injectedVariablesOf(jobWithSecrets);
+        if (injected == null) {
+          continue;
+        }
+        final int growth = injected.length - jobWithSecrets.job().getVariablesBuffer().capacity();
+        if (growth > remainingGrowth) {
+          return dropJobsThatNoLongerFit(
+              responseBatch, activatedBatch, jobWithSecrets.index(), growth, remainingGrowth);
+        }
+        // the registered job belongs to the to-be-activated batch; the response element at the
+        // same index carries the same variables until they are replaced here
+        responseBatch
+            .jobs()
+            .get(jobWithSecrets.index())
+            .setVariables(BufferUtil.wrapArray(injected));
+        remainingGrowth -= growth;
       }
-      final int growth = injected.length - jobWithSecrets.job().getVariablesBuffer().capacity();
-      if (growth > remainingGrowth) {
-        return dropJobsThatNoLongerFit(
-            responseBatch, activatedBatch, jobWithSecrets.index(), growth, remainingGrowth);
-      }
-      // the registered job belongs to the to-be-activated batch; the response element at the same
-      // index carries the same variables until they are replaced here
-      responseBatch.jobs().get(jobWithSecrets.index()).setVariables(BufferUtil.wrapArray(injected));
-      remainingGrowth -= growth;
+      return Optional.empty();
+    } finally {
+      reset();
     }
-    return Optional.empty();
   }
 
   /**
@@ -214,8 +212,7 @@ public final class JobSecretInjector {
    * {@code null} when no placeholder was found. A failed injection also returns {@code null} and is
    * only logged, so the job is activated with its placeholders instead of failing the batch.
    */
-  private byte[] injectedVariablesOf(
-      final JobWithCachedSecrets jobWithSecrets, final Map<SecretReference, String> values) {
+  private byte[] injectedVariablesOf(final JobWithCachedSecrets jobWithSecrets) {
     try {
       final DirectBuffer variables = jobWithSecrets.job().getVariablesBuffer();
       final JsonNode document = variablesMapper.readTree(new DirectBufferInputStream(variables));
@@ -326,16 +323,6 @@ public final class JobSecretInjector {
    */
   public record SecretCheckResult(List<Secret> cachedSecrets, List<Secret> nonCachedSecrets) {
     static final SecretCheckResult NO_SECRETS = new SecretCheckResult(List.of(), List.of());
-  }
-
-  /**
-   * The preparation of an activation batch for {@link #injectSecretValues}: the cached secret
-   * values materialized by {@link #checkSecrets} and the appended jobs with secret references
-   * registered via {@link #registerForInjection}.
-   */
-  public record Preparation(
-      Map<SecretReference, String> values, List<JobWithCachedSecrets> jobsWithCachedSecrets) {
-    static final Preparation NONE = new Preparation(Map.of(), List.of());
   }
 
   /** A registered job: its index in the batch, the job, and its cached secrets. */

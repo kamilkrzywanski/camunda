@@ -19,7 +19,6 @@ import io.camunda.zeebe.engine.processing.common.ElementTreePathBuilder;
 import io.camunda.zeebe.engine.processing.identity.AuthorizedTenants;
 import io.camunda.zeebe.engine.processing.identity.authorization.CslAuthorizationCheck;
 import io.camunda.zeebe.engine.processing.job.JobSecretInjector.OversizedJob;
-import io.camunda.zeebe.engine.processing.job.JobSecretInjector.Preparation;
 import io.camunda.zeebe.engine.processing.streamprocessor.TypedRecordProcessor;
 import io.camunda.zeebe.engine.processing.streamprocessor.writers.StateWriter;
 import io.camunda.zeebe.engine.processing.streamprocessor.writers.TypedRejectionWriter;
@@ -202,12 +201,9 @@ public final class JobBatchActivateProcessor implements TypedRecordProcessor<Job
       final TypedRecord<JobBatchRecord> record,
       final JobBatchRecord value,
       final long jobBatchKey) {
-    // the collector skipped the jobs whose secret references are not all cached; take the cached
-    // values and the appended jobs with secret references it prepared for the value injection
-    final var preparation = jobSecretInjector.finishPreparation();
     // building the response can drop jobs from the batch (those whose injected secret values
     // would exceed the max message size), so it must happen before the ACTIVATED event
-    final var response = responseValueFor(record, value, preparation);
+    final var response = responseValueFor(record, value);
     // append (and apply to state) the ACTIVATED event with the unresolved placeholders
     stateWriter.appendFollowUpEvent(jobBatchKey, JobBatchIntent.ACTIVATED, value);
     responseWriter.writeAcceptedResponseOnCommand(
@@ -226,15 +222,13 @@ public final class JobBatchActivateProcessor implements TypedRecordProcessor<Job
    * gets a message-size incident instead, like a job that is too large without secrets.
    */
   private JobBatchRecord responseValueFor(
-      final TypedRecord<JobBatchRecord> record,
-      final JobBatchRecord value,
-      final Preparation preparation) {
-    if (!record.hasRequestMetadata() || preparation.jobsWithCachedSecrets().isEmpty()) {
+      final TypedRecord<JobBatchRecord> record, final JobBatchRecord value) {
+    if (!record.hasRequestMetadata() || !jobSecretInjector.hasSecretsToInject()) {
       return value;
     }
     responseValue.wrap(value);
     jobSecretInjector
-        .injectSecretValues(responseValue, value, preparation)
+        .injectSecretValues(responseValue, value)
         .ifPresent(this::raiseIncidentJobSecretValuesTooLargeForMessageSize);
     return responseValue;
   }
