@@ -21,7 +21,10 @@ import io.camunda.zeebe.model.bpmn.BpmnModelInstance;
 import io.camunda.zeebe.model.bpmn.builder.ServiceTaskBuilder;
 import io.camunda.zeebe.protocol.impl.record.value.job.JobBatchRecord;
 import io.camunda.zeebe.protocol.record.Record;
+import io.camunda.zeebe.protocol.record.RecordType;
+import io.camunda.zeebe.protocol.record.RejectionType;
 import io.camunda.zeebe.protocol.record.intent.IncidentIntent;
+import io.camunda.zeebe.protocol.record.intent.JobBatchIntent;
 import io.camunda.zeebe.protocol.record.intent.JobIntent;
 import io.camunda.zeebe.protocol.record.value.ErrorType;
 import io.camunda.zeebe.protocol.record.value.IncidentRecordValue;
@@ -130,26 +133,30 @@ public final class JobSecretActivationInjectionTest {
   }
 
   @Test
-  public void shouldNotActivateJobWhenResolverThrows() {
+  public void shouldFailActivationWhenSecretCacheLookupThrows() {
     // given
     failResolution = true;
     deploy(t -> t.zeebeInputExpression("\"Bearer \" + camunda.secrets.token", "authorization"));
     createInstanceAndAwaitJob();
 
-    // when
-    final Record<JobBatchRecordValue> activated =
-        engine.jobs().withType(JOB_TYPE).withRequestStreamId(1).withRequestId(1L).activate();
+    // when - the cache failure propagates and fails the activation command
+    final Record<JobBatchRecordValue> rejection =
+        engine.jobs().withType(JOB_TYPE).expectRejection().activate();
 
-    // then - the job is not handed out
-    assertThat(activated.getValue().getJobs()).isEmpty();
-    Awaitility.await("until the activation response is written")
-        .atMost(Duration.ofSeconds(5))
-        .untilAsserted(() -> assertThat(activationResponse).isNotNull());
-    assertThat(activationResponse.getJobs()).isEmpty();
+    // then - the command is rejected with the processing error and no job is handed out
+    assertThat(rejection.getRejectionType()).isEqualTo(RejectionType.PROCESSING_ERROR);
+    assertThat(rejection.getRejectionReason()).contains("resolver exploded");
+    assertThat(
+            RecordingExporter.records()
+                .limit(record -> record.getRecordType() == RecordType.COMMAND_REJECTION)
+                .withIntent(JobBatchIntent.ACTIVATED))
+        .isEmpty();
 
-    // and - the resolver error stays out of every exported record
-    assertThat(RecordingExporter.getRecords())
-        .noneMatch(record -> record.toString().contains("resolver exploded"));
+    // and - the job stays activatable: with a working cache the next activation hands it out
+    failResolution = false;
+    cachedSecrets.put("token", "resolved-secret");
+    final Record<JobBatchRecordValue> secondAttempt = engine.jobs().withType(JOB_TYPE).activate();
+    assertThat(secondAttempt.getValue().getJobs()).hasSize(1);
   }
 
   @Test
