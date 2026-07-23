@@ -181,7 +181,7 @@ final class JobSecretInjectorTest {
       // then
       assertThat(jobKeysOf(collected.batch())).isEmpty();
       assertThat(variablesOfAllJobs(collected.batch())).isEmpty();
-      assertThat(collected.preparation().pendingJobs()).isEmpty();
+      assertThat(collected.preparation().jobsWithCachedSecrets()).isEmpty();
     }
 
     @Test
@@ -326,7 +326,7 @@ final class JobSecretInjectorTest {
       // then
       assertThat(jobKeysOf(collected.batch())).containsExactly(100L, 101L);
       assertThat(collected.preparation().values()).isEmpty();
-      assertThat(collected.preparation().pendingJobs()).isEmpty();
+      assertThat(collected.preparation().jobsWithCachedSecrets()).isEmpty();
     }
   }
 

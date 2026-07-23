@@ -212,8 +212,8 @@ final class JobBatchCollectorTest {
     // then - both jobs are collected and the secret job is prepared for the value injection at
     // its batch position
     JobBatchRecordValueAssert.assertThat(record.getValue()).hasJobKeys(cachedJob.key, plainJob.key);
-    assertThat(preparation.pendingJobs()).hasSize(1);
-    assertThat(preparation.pendingJobs().getFirst().index()).isZero();
+    assertThat(preparation.jobsWithCachedSecrets()).hasSize(1);
+    assertThat(preparation.jobsWithCachedSecrets().getFirst().index()).isZero();
   }
 
   @Test

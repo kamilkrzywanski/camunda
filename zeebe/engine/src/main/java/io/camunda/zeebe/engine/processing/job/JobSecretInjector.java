@@ -75,7 +75,7 @@ public final class JobSecretInjector {
   // accumulated per activation command while the collector checks and appends jobs, handed out
   // (and reset) by finishPreparation
   private final Map<SecretReference, String> values = new HashMap<>();
-  private final List<PendingJob> pendingJobs = new ArrayList<>();
+  private final List<JobWithCachedSecrets> jobsWithCachedSecrets = new ArrayList<>();
 
   public JobSecretInjector(final SecretStoreRegistry secretStoreRegistry) {
     caches = secretStoreRegistry.getCaches();
@@ -84,7 +84,7 @@ public final class JobSecretInjector {
   /** Discards any state accumulated for a previous activation command. */
   public void reset() {
     values.clear();
-    pendingJobs.clear();
+    jobsWithCachedSecrets.clear();
   }
 
   /**
@@ -122,7 +122,8 @@ public final class JobSecretInjector {
   public void registerForInjection(
       final SecretCheckResult check, final int batchIndex, final JobRecord appendedJob) {
     if (check.nonCachedSecrets().isEmpty() && !check.cachedSecrets().isEmpty()) {
-      pendingJobs.add(new PendingJob(batchIndex, appendedJob, check.cachedSecrets()));
+      jobsWithCachedSecrets.add(
+          new JobWithCachedSecrets(batchIndex, appendedJob, check.cachedSecrets()));
     }
   }
 
@@ -132,11 +133,11 @@ public final class JobSecretInjector {
    * #registerForInjection}. Resets this injector for the next activation command.
    */
   public Preparation finishPreparation() {
-    if (pendingJobs.isEmpty()) {
+    if (jobsWithCachedSecrets.isEmpty()) {
       reset();
       return Preparation.NONE;
     }
-    final var preparation = new Preparation(Map.copyOf(values), List.copyOf(pendingJobs));
+    final var preparation = new Preparation(Map.copyOf(values), List.copyOf(jobsWithCachedSecrets));
     reset();
     return preparation;
   }
@@ -177,19 +178,19 @@ public final class JobSecretInjector {
       final JobBatchRecord activatedBatch,
       final Preparation preparation) {
     int remainingGrowth = EngineConfiguration.BATCH_SIZE_CALCULATION_BUFFER;
-    for (final PendingJob pendingJob : preparation.pendingJobs()) {
-      final byte[] injected = injectedVariablesOf(pendingJob, preparation.values());
+    for (final JobWithCachedSecrets jobWithSecrets : preparation.jobsWithCachedSecrets()) {
+      final byte[] injected = injectedVariablesOf(jobWithSecrets, preparation.values());
       if (injected == null) {
         continue;
       }
-      final int growth = injected.length - pendingJob.job().getVariablesBuffer().capacity();
+      final int growth = injected.length - jobWithSecrets.job().getVariablesBuffer().capacity();
       if (growth > remainingGrowth) {
         return dropJobsThatNoLongerFit(
-            responseBatch, activatedBatch, pendingJob.index(), growth, remainingGrowth);
+            responseBatch, activatedBatch, jobWithSecrets.index(), growth, remainingGrowth);
       }
-      // the pending job belongs to the to-be-activated batch; the response element at the same
+      // the registered job belongs to the to-be-activated batch; the response element at the same
       // index carries the same variables until they are replaced here
-      responseBatch.jobs().get(pendingJob.index()).setVariables(BufferUtil.wrapArray(injected));
+      responseBatch.jobs().get(jobWithSecrets.index()).setVariables(BufferUtil.wrapArray(injected));
       remainingGrowth -= growth;
     }
     return Optional.empty();
@@ -209,17 +210,17 @@ public final class JobSecretInjector {
   }
 
   /**
-   * Returns the pending job's variables with every secret placeholder replaced by its cached value,
-   * or {@code null} when no placeholder was found. A failed injection also returns {@code null} and
-   * is only logged, so the job is activated with its placeholders instead of failing the batch.
+   * Returns the job's variables with every secret placeholder replaced by its cached value, or
+   * {@code null} when no placeholder was found. A failed injection also returns {@code null} and is
+   * only logged, so the job is activated with its placeholders instead of failing the batch.
    */
   private byte[] injectedVariablesOf(
-      final PendingJob pendingJob, final Map<SecretReference, String> values) {
+      final JobWithCachedSecrets jobWithSecrets, final Map<SecretReference, String> values) {
     try {
-      final DirectBuffer variables = pendingJob.job().getVariablesBuffer();
+      final DirectBuffer variables = jobWithSecrets.job().getVariablesBuffer();
       final JsonNode document = variablesMapper.readTree(new DirectBufferInputStream(variables));
       boolean changed = false;
-      for (final Secret secret : pendingJob.secrets()) {
+      for (final Secret secret : jobWithSecrets.cachedSecrets()) {
         changed |= replaceInLeaf(document, secret, values.get(secret.reference()));
       }
       return changed ? variablesMapper.writeValueAsBytes(document) : null;
@@ -227,8 +228,8 @@ public final class JobSecretInjector {
       LOGGER.warn(
           "Failed to inject secret values into the variables of the job of element '{}' of "
               + "process instance {}; the job keeps its placeholders",
-          pendingJob.job().getElementId(),
-          pendingJob.job().getProcessInstanceKey(),
+          jobWithSecrets.job().getElementId(),
+          jobWithSecrets.job().getProcessInstanceKey(),
           e);
       return null;
     }
@@ -332,12 +333,13 @@ public final class JobSecretInjector {
    * values materialized by {@link #checkSecrets} and the appended jobs with secret references
    * registered via {@link #registerForInjection}.
    */
-  public record Preparation(Map<SecretReference, String> values, List<PendingJob> pendingJobs) {
+  public record Preparation(
+      Map<SecretReference, String> values, List<JobWithCachedSecrets> jobsWithCachedSecrets) {
     static final Preparation NONE = new Preparation(Map.of(), List.of());
   }
 
-  /** A job with secret references: its index in the batch, the job, and its secrets. */
-  record PendingJob(int index, JobRecord job, List<Secret> secrets) {}
+  /** A registered job: its index in the batch, the job, and its cached secrets. */
+  record JobWithCachedSecrets(int index, JobRecord job, List<Secret> cachedSecrets) {}
 
   /**
    * A job dropped from the batch whose secret values can never fit: injecting them would grow the

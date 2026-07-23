@@ -229,7 +229,7 @@ public final class JobBatchActivateProcessor implements TypedRecordProcessor<Job
       final TypedRecord<JobBatchRecord> record,
       final JobBatchRecord value,
       final Preparation preparation) {
-    if (!record.hasRequestMetadata() || preparation.pendingJobs().isEmpty()) {
+    if (!record.hasRequestMetadata() || preparation.jobsWithCachedSecrets().isEmpty()) {
       return value;
     }
     responseValue.wrap(value);
