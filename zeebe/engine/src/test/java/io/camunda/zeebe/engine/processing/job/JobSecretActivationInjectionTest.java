@@ -48,37 +48,20 @@ public final class JobSecretActivationInjectionTest {
   private static final String TASK_ID = "task";
   private static final String JOB_TYPE = "task-type";
 
-  private final Map<String, String> cachedSecrets = new HashMap<>();
-  private boolean failResolution;
-
-  /** Serves the test's cached secrets and simulates a broken cache when the flag is set. */
-  private final SecretCache secretCache =
-      new SecretCache() {
-        @Override
-        public Optional<String> get(final String name) {
-          if (failResolution) {
-            throw new IllegalStateException("resolver exploded");
-          }
-          return Optional.ofNullable(cachedSecrets.get(name));
-        }
-
-        @Override
-        public void put(final String name, final String value) {
-          cachedSecrets.put(name, value);
-        }
-      };
-
   @Rule
   public final EngineRule engine =
       EngineRule.singlePartition()
           .withSecretStoreRegistry(
               new SecretStoreRegistry(
-                  Map.of("default", new NoopSecretStore()), Map.of("default", secretCache)));
+                  Map.of("default", new NoopSecretStore()),
+                  Map.of("default", new TestSecretCache())));
 
   @Rule
   public final RecordingExporterTestWatcher recordingExporterTestWatcher =
       new RecordingExporterTestWatcher();
 
+  private final Map<String, String> cachedSecrets = new HashMap<>();
+  private boolean failResolution;
   private CommandResponseWriter mockResponseWriter;
   private volatile JobBatchRecord activationResponse;
 
@@ -355,5 +338,21 @@ public final class JobSecretActivationInjectionTest {
                 })
         .when(mockResponseWriter)
         .valueWriter(any());
+  }
+
+  /** Serves the test's cached secrets and simulates a broken cache when the flag is set. */
+  private final class TestSecretCache implements SecretCache {
+    @Override
+    public Optional<String> get(final String name) {
+      if (failResolution) {
+        throw new IllegalStateException("resolver exploded");
+      }
+      return Optional.ofNullable(cachedSecrets.get(name));
+    }
+
+    @Override
+    public void put(final String name, final String value) {
+      cachedSecrets.put(name, value);
+    }
   }
 }
