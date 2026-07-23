@@ -66,7 +66,7 @@ final class JobSecretInjectorTest {
     long key = 100;
     for (final JobRecord job : jobs) {
       final var check = injector.checkSecrets(job);
-      if (check.activatable()) {
+      if (check.nonCachedSecrets().isEmpty()) {
         batch.jobKeys().add().setValue(key);
         final JobRecord appendedJob = batch.jobs().add();
         appendedJob.copyFrom(job);
@@ -182,6 +182,32 @@ final class JobSecretInjectorTest {
       assertThat(jobKeysOf(collected.batch())).isEmpty();
       assertThat(variablesOfAllJobs(collected.batch())).isEmpty();
       assertThat(collected.preparation().pendingJobs()).isEmpty();
+    }
+
+    @Test
+    void shouldReportAllNonCachedSecretsOfAJob() {
+      // given - one cached and two non-cached references on the same job
+      final var injector = injector(Map.of("token", "t"));
+      final var job =
+          job(
+              Map.of(
+                  "auth", "camunda.secrets.token",
+                  "key", "camunda.secrets.apiKey",
+                  "other", "camunda.secrets.other"),
+              ref("token", "/auth"),
+              ref("apiKey", "/key"),
+              ref("other", "/other"));
+
+      // when
+      final var check = injector.checkSecrets(job);
+
+      // then - every non-cached reference is reported, not only the first miss
+      assertThat(check.cachedSecrets())
+          .extracting(secret -> secret.reference().name())
+          .containsExactly("token");
+      assertThat(check.nonCachedSecrets())
+          .extracting(secret -> secret.reference().name())
+          .containsExactlyInAnyOrder("apiKey", "other");
     }
 
     @Test

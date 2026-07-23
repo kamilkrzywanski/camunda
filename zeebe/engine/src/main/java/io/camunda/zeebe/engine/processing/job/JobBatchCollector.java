@@ -123,7 +123,7 @@ final class JobBatchCollector {
           }
 
           final var secretCheck = jobSecretInjector.checkSecrets(jobRecord);
-          if (!secretCheck.activatable()) {
+          if (!secretCheck.nonCachedSecrets().isEmpty()) {
             // Skip jobs with an uncached secret reference without consuming a batch slot, so the
             // jobs behind them can still be activated; the skipped jobs stay activatable. The
             // skips are bounded so one activation command cannot scan arbitrarily many jobs. The

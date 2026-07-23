@@ -88,37 +88,41 @@ public final class JobSecretInjector {
   }
 
   /**
-   * Checks whether every secret reference of the job (stored on the {@link JobRecord} at creation)
-   * has a cached value, materializing the values and the job's secrets once. Jobs without secret
-   * references are always activatable. A cache lookup failure propagates to the caller and fails
-   * the activation command.
+   * Checks each secret reference of the job (stored on the {@link JobRecord} at creation) for a
+   * cached value, materializing the values and the job's secrets once. Every reference is checked,
+   * even after the first miss, so the caller sees all non-cached references of the job. A cache
+   * lookup failure propagates to the caller and fails the activation command.
    *
    * <p>TODO(https://github.com/camunda/camunda/issues/57846): the skipped jobs stay activatable,
    * which can make a long poll collect them again right away. Instead, mark them as waiting for
-   * secret resolution and request the background resolution of their secrets.
+   * secret resolution and request the background resolution of their non-cached references.
    */
-  public SecretCheck checkSecrets(final JobRecord job) {
+  public SecretCheckResult checkSecrets(final JobRecord job) {
     if (!job.hasSecretReferences()) {
-      return SecretCheck.NO_SECRETS;
+      return SecretCheckResult.NO_SECRETS;
     }
-    final List<Secret> secrets = secretsOf(job);
-    for (final Secret secret : secrets) {
-      if (!resolveIntoValues(secret.reference())) {
-        return SecretCheck.SKIP;
+    final List<Secret> cachedSecrets = new ArrayList<>();
+    final List<Secret> nonCachedSecrets = new ArrayList<>();
+    for (final Secret secret : secretsOf(job)) {
+      if (resolveIntoValues(secret.reference())) {
+        cachedSecrets.add(secret);
+      } else {
+        nonCachedSecrets.add(secret);
       }
     }
-    return new SecretCheck(true, secrets);
+    return new SecretCheckResult(cachedSecrets, nonCachedSecrets);
   }
 
   /**
    * Registers a job appended to the batch for the value injection of {@link #injectSecretValues},
    * with its position in the batch and the appended {@link JobRecord} element (whose variables the
-   * injection reads). A check without secrets registers nothing.
+   * injection reads). Only a job whose references are all cached is registered; a check without
+   * secrets registers nothing.
    */
   public void registerForInjection(
-      final SecretCheck check, final int batchIndex, final JobRecord appendedJob) {
-    if (!check.secrets().isEmpty()) {
-      pendingJobs.add(new PendingJob(batchIndex, appendedJob, check.secrets()));
+      final SecretCheckResult check, final int batchIndex, final JobRecord appendedJob) {
+    if (check.nonCachedSecrets().isEmpty() && !check.cachedSecrets().isEmpty()) {
+      pendingJobs.add(new PendingJob(batchIndex, appendedJob, check.cachedSecrets()));
     }
   }
 
@@ -315,12 +319,12 @@ public final class JobSecretInjector {
   record Secret(SecretReference reference, String path, String placeholder) {}
 
   /**
-   * The result of {@link #checkSecrets} for one job: whether the job may be activated, and its
-   * secrets, materialized once (empty for a job without secret references).
+   * The result of {@link #checkSecrets} for one job: the job's secrets with a cached value and
+   * those without one, each materialized once (both empty for a job without secret references). A
+   * job with any non-cached secret must not be activated.
    */
-  public record SecretCheck(boolean activatable, List<Secret> secrets) {
-    static final SecretCheck NO_SECRETS = new SecretCheck(true, List.of());
-    static final SecretCheck SKIP = new SecretCheck(false, List.of());
+  public record SecretCheckResult(List<Secret> cachedSecrets, List<Secret> nonCachedSecrets) {
+    static final SecretCheckResult NO_SECRETS = new SecretCheckResult(List.of(), List.of());
   }
 
   /**
