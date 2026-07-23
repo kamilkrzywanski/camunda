@@ -76,7 +76,6 @@ public final class JobSecretInjector {
   // (and reset) by finishPreparation
   private final Map<SecretReference, String> values = new HashMap<>();
   private final List<PendingJob> pendingJobs = new ArrayList<>();
-  private boolean lookupFailed;
 
   public JobSecretInjector(final SecretStoreRegistry secretStoreRegistry) {
     caches = secretStoreRegistry.getCaches();
@@ -86,14 +85,13 @@ public final class JobSecretInjector {
   public void reset() {
     values.clear();
     pendingJobs.clear();
-    lookupFailed = false;
   }
 
   /**
    * Checks whether every secret reference of the job (stored on the {@link JobRecord} at creation)
    * has a cached value, materializing the values and the job's secrets once. Jobs without secret
-   * references are always activatable. Once a cache lookup fails, every later job with a reference
-   * that was not resolved before the failure is skipped, so no half-resolved job is handed out.
+   * references are always activatable. A cache lookup failure propagates to the caller and fails
+   * the activation command.
    *
    * <p>TODO(https://github.com/camunda/camunda/issues/57846): the skipped jobs stay activatable,
    * which can make a long poll collect them again right away. Instead, mark them as waiting for
@@ -141,32 +139,20 @@ public final class JobSecretInjector {
 
   /**
    * Resolves the reference into the materialized values, or returns {@code false} when it has no
-   * cached value. A reference resolved before is not looked up again. If a lookup fails, no later
-   * reference resolves for this activation command, and the failure is logged once.
+   * cached value. A reference resolved before is not looked up again. A cache lookup failure is
+   * deliberately not caught here: it propagates and fails the activation command.
    */
   private boolean resolveIntoValues(final SecretReference reference) {
     if (values.containsKey(reference)) {
       return true;
     }
-    if (lookupFailed) {
+    final SecretCache cache = cacheOf(reference.storeId());
+    if (cache == null) {
       return false;
     }
-    try {
-      final SecretCache cache = cacheOf(reference.storeId());
-      if (cache == null) {
-        return false;
-      }
-      final Optional<String> value = cache.get(reference.name());
-      value.ifPresent(cachedValue -> values.put(reference, cachedValue));
-      return value.isPresent();
-    } catch (final RuntimeException e) {
-      lookupFailed = true;
-      LOGGER.warn(
-          "Failed to look up the secret references of a job activation batch; "
-              + "the affected jobs are not activated",
-          e);
-      return false;
-    }
+    final Optional<String> value = cache.get(reference.name());
+    value.ifPresent(cachedValue -> values.put(reference, cachedValue));
+    return value.isPresent();
   }
 
   /**

@@ -8,6 +8,7 @@
 package io.camunda.zeebe.engine.processing.job;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.camunda.secretstore.InMemorySecretCache;
 import io.camunda.secretstore.NoopSecretStore;
@@ -26,7 +27,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
@@ -205,8 +205,8 @@ final class JobSecretInjectorTest {
     }
 
     @Test
-    void shouldSkipSecretJobsWhenCacheLookupThrows() {
-      // given
+    void shouldPropagateCacheLookupFailure() {
+      // given - a broken cache; the failure must reach the processor instead of being swallowed
       final SecretCache throwingCache =
           new SecretCache() {
             @Override
@@ -218,56 +218,12 @@ final class JobSecretInjectorTest {
             public void put(final String name, final String value) {}
           };
       final var injector = new JobSecretInjector(registryWith(throwingCache));
+      final var job = job(Map.of("auth", "camunda.secrets.token"), ref("token", "/auth"));
 
-      // when
-      final var collected =
-          collect(
-              injector,
-              job(Map.of("auth", "camunda.secrets.token"), ref("token", "/auth")),
-              job(Map.of("foo", "bar")));
-
-      // then - only the job without references is collected
-      assertThat(variablesOfAllJobs(collected.batch())).containsExactly(Map.of("foo", "bar"));
-      assertThat(jobKeysOf(collected.batch())).containsExactly(101L);
-      assertThat(collected.preparation().values()).isEmpty();
-      assertThat(collected.preparation().pendingJobs()).isEmpty();
-    }
-
-    @Test
-    void shouldCollectJobWhoseReferencesWereResolvedBeforeLookupFailure() {
-      // given - the cache serves the first lookup and throws on every later one
-      final var lookups = new AtomicInteger();
-      final SecretCache failingAfterFirstLookup =
-          new SecretCache() {
-            @Override
-            public Optional<String> get(final String name) {
-              if (lookups.getAndIncrement() > 0) {
-                throw new IllegalStateException("cache is broken");
-              }
-              return Optional.of("resolved");
-            }
-
-            @Override
-            public void put(final String name, final String value) {}
-          };
-      final var injector = new JobSecretInjector(registryWith(failingAfterFirstLookup));
-
-      // when - the second job fails the lookup; the third job needs only the already resolved
-      // reference
-      final var collected =
-          collect(
-              injector,
-              job(Map.of("a", "camunda.secrets.token"), ref("token", "/a")),
-              job(Map.of("b", "camunda.secrets.other"), ref("other", "/b")),
-              job(Map.of("c", "camunda.secrets.token"), ref("token", "/c")));
-
-      // then - the jobs covered by the value resolved before the failure are collected
-      assertThat(variablesOfAllJobs(collected.batch()))
-          .containsExactly(
-              Map.of("a", "camunda.secrets.token"), Map.of("c", "camunda.secrets.token"));
-      assertThat(jobKeysOf(collected.batch())).containsExactly(100L, 102L);
-      assertThat(collected.preparation().values())
-          .containsEntry(new SecretReference(STORE_ID, "token"), "resolved");
+      // when/then
+      assertThatThrownBy(() -> injector.checkSecrets(job))
+          .isInstanceOf(IllegalStateException.class)
+          .hasMessage("cache is broken");
     }
 
     @Test
