@@ -74,6 +74,7 @@ Either use:
   the other resources.
 * Delete the resources from the `keycloak-operator` namespace by targetting the specific `namespace`
   label with:
+
   ```shell
   kubectl delete keycloak,secret -n keycloak-operator -l camunda.io/load-test-namespace=<load-test-namespace>
   ```
